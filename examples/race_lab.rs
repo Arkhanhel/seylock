@@ -159,6 +159,7 @@ fn list(api: String, paths: Vec<PathSpec>) -> EndpointList {
         logical: None,
         services: [("api".to_string(), api)].into_iter().collect(),
         paths,
+        tor_bridges: Vec::new(),
     }
 }
 

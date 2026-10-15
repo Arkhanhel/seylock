@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- The `tor` path works when a Tor client is installed: a new `tor` module
+  with a `TorConnector` hook, which the separate `seylock-tor` crate
+  implements with arti. The core gains no dependencies.
+- Runtime status reports the Tor state (`tor`), absent without a connector.
+- `runtime::handle()` gives companion crates the proxy's runtime.
+- Connect timeout for `tor` is 60 s, enough for a cold Tor start.
+- Format 2 lists may carry Tor bridge lines (`tor_bridges`), checked for count,
+  length and printable ASCII (new rejection code 11) and handed to the
+  installed Tor connector whenever the list changes. Test vectors: 55.
+- `tor::list_bridges()`, so a connector can include the list's bridges from
+  its first bootstrap.
+
 - README: who the library is for, how it works, badges, an up-to-date status
   and roadmap.
 

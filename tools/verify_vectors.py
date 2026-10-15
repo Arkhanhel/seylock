@@ -112,6 +112,8 @@ CONTEXT_V1 = b"secretly-endpoints-v1\n"
 CONTEXT_V2 = b"transport-endpoints-v2\n"
 CLOCK_SKEW_MS = 7 * 24 * 60 * 60 * 1000
 MAX_SERVICES = 16
+MAX_TOR_BRIDGES = 32
+MAX_TOR_BRIDGE_LEN = 2048
 NAME_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789-")
 
 
@@ -186,6 +188,11 @@ def _parse_document(doc):
         raise Reject(4)
     if "services" in d and not _str_map(d["services"]):
         raise Reject(4)
+    if "tor_bridges" in d and not (
+        isinstance(d["tor_bridges"], list)
+        and all(isinstance(b, str) for b in d["tor_bridges"])
+    ):
+        raise Reject(4)
     if not isinstance(d.get("paths"), list):
         raise Reject(4)
     for p in d["paths"]:
@@ -201,8 +208,9 @@ def _check_shape(d):
     paths = d["paths"]
     services = d.get("services") or {}
     webby = [p for p in paths if p["kind"] in ("mirror", "cdn")]
+    bridges = d.get("tor_bridges") or []
     if d["v"] == 1:
-        if services:
+        if services or bridges:
             raise Reject(4)
         for p in webby:
             if p.get("keys") is None or p.get("relay") is None or p.get("targets"):
@@ -224,6 +232,11 @@ def _check_shape(d):
         for name, base in p["targets"].items():
             if name not in services or base == "":
                 raise Reject(10)
+    def bridge_ok(b):
+        raw = b.encode("utf-8")
+        return 1 <= len(raw) <= MAX_TOR_BRIDGE_LEN and all(0x20 <= c <= 0x7E for c in raw)
+    if len(bridges) > MAX_TOR_BRIDGES or not all(bridge_ok(b) for b in bridges):
+        raise Reject(11)
 
 
 def accept(signed_json, public_key_b64, now_ms, current_issued_at_ms):

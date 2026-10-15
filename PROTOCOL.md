@@ -64,6 +64,7 @@ name its own, so the library serves any application:
 | `services` | Canonical base URL of each service, by name. At least 1, at most 16. Replaces `logical`, which must be absent. |
 | service name | 1 to 32 bytes of lowercase ASCII letters, digits and `-`, not starting with `-`. |
 | `targets` (in `mirror` and `cdn`) | Base URL of that mirror or CDN name for each service it serves. Replaces `keys` and `relay`, which must be absent. Every name must be in `services`. |
+| `tor_bridges` | Optional. Tor bridge lines (`obfs4 ...`, `webtunnel ...`, or a plain `address fingerprint`), at most 32, each 1 to 2048 bytes of printable ASCII. The library does not interpret them: it hands them to the installed Tor connector, so bridges are distributed and rotated like the other ways in. |
 
 A mirror or CDN name that has no target for a service is not used for that
 service: a request for it skips the path without recording a failure.
@@ -95,7 +96,7 @@ document alone; CI checks that it agrees with every vector.
 | `cdn` | `keys`, `relay` | the CDN URL's host | the CDN URL's host |
 | `proxy` | `host`, `port` (default 443) | `host:port`, TLS to it, then TLS to the `logical` host inside | outer: `host`; inner: the `logical` host |
 | `socks` | `addr` (`ip:port`) | a SOCKS5 proxy, which connects to the `logical` host by name | the `logical` host |
-| `tor` | none | reserved for a built-in Tor client; version 0.1 reports it as failed | |
+| `tor` | none | a Tor client the application installs (see below); without one the path fails at once | the `logical` host, inside the Tor stream |
 
 `mirror` and `cdn` are different only in intent and default order: a mirror
 is a server or reverse proxy you run, a CDN name is served by a third party.
@@ -144,8 +145,9 @@ the C ABI.
 | 8 | `paths` is not empty; format 1: both `logical` URLs are set; format 2: `services` is not empty and no base URL in it is empty. |
 | 9 | Format 2: every service name is valid, and there are at most 16. |
 | 10 | Format 2: every `targets` name is in `services`, with a non-empty URL. |
+| 11 | Format 2: `tor_bridges` has at most 32 lines, each 1 to 2048 bytes of printable ASCII. |
 
-A document that mixes the formats — `services` or `targets` in format 1,
+A document that mixes the formats — `services`, `targets` or `tor_bridges` in format 1,
 `logical`, `keys` or `relay` in format 2 — or a format 1 `mirror` or `cdn`
 without both `keys` and `relay`, is rejected with code 4.
 
@@ -207,8 +209,18 @@ won is not recorded, since nothing was learned about it.
 
 Measurements are in [RACE_LAB.md](RACE_LAB.md).
 
-Connect timeouts are 6 seconds for `direct` and `ip`, and 12 seconds for
-the others.
+Connect timeouts are 6 seconds for `direct` and `ip`, 60 seconds for `tor`
+(a cold Tor start takes 10 to 20 seconds before the first circuit), and 12
+seconds for the others.
+
+### The `tor` path
+
+The core library contains no Tor client. An application that wants one
+installs a connector through the `tor` module (Rust) or, from other
+languages, links `seylock-tor` and calls `seylock_tor_enable`. The connector
+opens a stream to the `logical` host and port through Tor; TLS to that host
+runs inside it, as on the `socks` path. Without a connector the path fails at
+once and is recorded as failed like any other.
 
 A path whose target cannot be resolved at all — a `mirror` or `cdn` entry
 whose URL is not a valid `http`/`https` address — is skipped without being
@@ -290,4 +302,7 @@ running memory by itself when the list's `issued_at_ms` changes: path indexes
 refer to positions in the list, so a new list makes the old notes meaningless.
 
 Status JSON has `port`, `current` (path index or null), `current_kind`,
-`network_id`, `memory` (to persist between runs) and `issued_at_ms`.
+`network_id`, `memory` (to persist between runs) and `issued_at_ms`. When a
+Tor connector is installed it also has `tor`: `{"state":"bootstrapping",
+"percent":N}`, `{"state":"ready"}` or `{"state":"failed","reason":"..."}`.
+Without a connector the field is absent.

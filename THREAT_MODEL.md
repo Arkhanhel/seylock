@@ -80,6 +80,19 @@ It cannot see or alter the contents without a certificate for the real name.
 The same holds for `socks`: the proxy sees the destination name and the
 traffic volume. TLS to the server runs end to end inside it.
 
+### Tor
+
+On the `tor` path (with `seylock-tor` installed), TLS to the server runs
+inside the Tor stream.
+
+- The exit relay sees the server name, the port and the traffic volume, but
+  not the content.
+- The network around the device sees a connection to Tor, or to a bridge.
+- Names are resolved by the exit relay, not by the local resolver.
+
+The Tor client is a separate crate, with its own dependency tree of about
+370 packages. Applications that do not install it carry none of that code.
+
 ### Another application on the same device
 
 The proxy listens on `127.0.0.1` only and drops connections from any other

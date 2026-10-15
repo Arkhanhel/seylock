@@ -76,6 +76,9 @@ pub const HEADER_PATH: &str = "x-secretly-path";
 
 const CONNECT_TIMEOUT_CHEAP: Duration = Duration::from_secs(6);
 const CONNECT_TIMEOUT_EXPENSIVE: Duration = Duration::from_secs(12);
+/// Tor may still be bootstrapping: a cold start with an empty directory cache
+/// takes 10 to 20 seconds before the first circuit.
+const CONNECT_TIMEOUT_TOR: Duration = Duration::from_secs(60);
 
 /// Bounds applied to [`Race`] values, so a bad setting cannot turn the proxy
 /// into a connection flood or make it wait for minutes.
@@ -200,6 +203,8 @@ impl ProxyHandle {
     pub async fn update_policy(&self, f: impl FnOnce(&mut Policy)) {
         let mut p = self.policy.lock().await;
         f(&mut p);
+        // A new list may carry new Tor bridges.
+        crate::tor::set_list_bridges(&p.list.tor_bridges);
     }
 
     /// Returns a snapshot of the current policy.
@@ -250,6 +255,7 @@ pub async fn start_with_clock(
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let port = listener.local_addr()?.port();
     let token = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 24]>());
+    crate::tor::set_list_bridges(&policy.list.tor_bridges);
     let policy = Arc::new(Mutex::new(policy));
     let shared = Shared {
         token: token.clone(),
@@ -545,6 +551,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncReadWrite for T {}
 async fn connect(shared: &Shared, spec: &PathSpec, target: &Target) -> Result<Upstream_, String> {
     let timeout = match spec.kind() {
         PathKind::Direct | PathKind::Ip => CONNECT_TIMEOUT_CHEAP,
+        PathKind::Tor => CONNECT_TIMEOUT_TOR,
         _ => CONNECT_TIMEOUT_EXPENSIVE,
     };
     tokio::time::timeout(timeout, connect_inner(shared, spec, target))
@@ -582,7 +589,13 @@ async fn connect_inner(
                     .map_err(|e| e.to_string())?;
             maybe_tls(shared, stream, target).await
         }
-        PathSpec::Tor => Err("tor: not built in this version".to_string()),
+        PathSpec::Tor => {
+            let Some(connector) = crate::tor::installed() else {
+                return Err("tor: no Tor connector installed".to_string());
+            };
+            let stream = connector.connect(&target.host, target.port).await?;
+            maybe_tls(shared, stream, target).await
+        }
     }
 }
 
@@ -793,6 +806,7 @@ mod tests {
                 }),
                 services: Default::default(),
                 paths,
+                tor_bridges: Vec::new(),
             },
             memory: PathMemory::default(),
             network_id: "test".into(),
@@ -1213,6 +1227,92 @@ mod tests {
         };
         assert_eq!(zero.delay(), Duration::from_millis(RACE_DELAY_MAX_MS));
         assert_eq!(zero.parallel(), 1);
+    }
+
+    /// A stand-in for a Tor client: opens a plain TCP connection and counts.
+    struct FakeTor {
+        hits: Arc<AtomicUsize>,
+        bridges: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    }
+
+    impl crate::tor::TorConnector for FakeTor {
+        fn connect<'a>(&'a self, host: &'a str, port: u16) -> crate::tor::ConnectFuture<'a> {
+            Box::pin(async move {
+                self.hits.fetch_add(1, Ordering::SeqCst);
+                let s = TcpStream::connect((host, port))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(Box::new(s) as Box<dyn crate::tor::TorStream>)
+            })
+        }
+
+        fn state(&self) -> crate::tor::TorState {
+            crate::tor::TorState::Ready
+        }
+
+        fn set_bridges(&self, bridges: &[String]) {
+            self.bridges.lock().unwrap().push(bridges.to_vec());
+        }
+    }
+
+    // The connector is process-wide, so every case that touches it lives in
+    // this one test.
+    #[tokio::test]
+    async fn tor_path_uses_the_installed_connector_only_when_allowed() {
+        let (port, hits) = upstream_server().await;
+        let mut p = policy(vec![PathSpec::Tor]);
+        p.list.logical = Some(Logical {
+            keys: format!("http://127.0.0.1:{port}/k"),
+            relay: format!("http://127.0.0.1:{port}/r"),
+        });
+        p.allow_tor = true;
+        let proxy = start(p).await.unwrap();
+
+        // No connector installed: the path fails and nothing is sent.
+        crate::tor::uninstall();
+        let (status, _, _) = get(&proxy, &proxy.token, "keys", "/a").await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+        // Installed: the request goes through it, and the path is reported.
+        let tor_hits = Arc::new(AtomicUsize::new(0));
+        let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+        crate::tor::install(Arc::new(FakeTor {
+            hits: tor_hits.clone(),
+            bridges: received.clone(),
+        }));
+        assert_eq!(crate::tor::state(), Some(crate::tor::TorState::Ready));
+        let (status, via, body) = get(&proxy, &proxy.token, "keys", "/a").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(via.as_deref(), Some("tor"));
+        assert!(body.contains("path=/k/a"), "{body}");
+        assert_eq!(tor_hits.load(Ordering::SeqCst), 1);
+
+        // Not allowed by the application: Tor is never touched.
+        proxy.update_policy(|p| p.allow_tor = false).await;
+        let (status, _, _) = get(&proxy, &proxy.token, "keys", "/b").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(tor_hits.load(Ordering::SeqCst), 1);
+
+        // Bridges from a new list reach the connector. Other tests start
+        // proxies concurrently and reset the list's bridges, so look for
+        // ours among everything the connector received.
+        let line =
+            "obfs4 192.0.2.1:443 0123456789ABCDEF0123456789ABCDEF01234567 cert=AAAA iat-mode=0";
+        proxy
+            .update_policy(|p| p.list.tor_bridges = vec![line.to_string()])
+            .await;
+        assert!(
+            received
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|b| b == &vec![line.to_string()]),
+            "the connector got the list's bridges"
+        );
+
+        assert!(crate::tor::uninstall());
+        assert_eq!(crate::tor::state(), None);
     }
 
     #[tokio::test]

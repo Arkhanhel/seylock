@@ -429,6 +429,77 @@ fn main() {
             )),
             10,
         ),
+        // 11: Tor bridges.
+        case(
+            "v2 with Tor bridge lines accepted",
+            s2(with(
+                v2(ISSUED, EXPIRES),
+                &["tor_bridges"],
+                json!([
+                    "obfs4 192.0.2.1:443 0123456789ABCDEF0123456789ABCDEF01234567 cert=AAAA iat-mode=0",
+                    "webtunnel [2001:db8::1]:443 0123456789ABCDEF0123456789ABCDEF01234567 url=https://example.org/path"
+                ]),
+            )),
+            0,
+        ),
+        case(
+            "33 Tor bridge lines",
+            s2(with(
+                v2(ISSUED, EXPIRES),
+                &["tor_bridges"],
+                json!(vec![
+                    "obfs4 192.0.2.1:443 0123456789ABCDEF0123456789ABCDEF01234567 cert=AAAA iat-mode=0";
+                    33
+                ]),
+            )),
+            11,
+        ),
+        case(
+            "empty Tor bridge line",
+            s2(with(v2(ISSUED, EXPIRES), &["tor_bridges"], json!([""]))),
+            11,
+        ),
+        case(
+            "Tor bridge line with a newline",
+            s2(with(
+                v2(ISSUED, EXPIRES),
+                &["tor_bridges"],
+                json!(["obfs4 a\nb"]),
+            )),
+            11,
+        ),
+        case(
+            "Tor bridge line with non-ASCII",
+            s2(with(
+                v2(ISSUED, EXPIRES),
+                &["tor_bridges"],
+                json!(["obfs4 caf\u{e9}"]),
+            )),
+            11,
+        ),
+        case(
+            "Tor bridge line longer than 2048 bytes",
+            s2(with(
+                v2(ISSUED, EXPIRES),
+                &["tor_bridges"],
+                json!(["x".repeat(2049)]),
+            )),
+            11,
+        ),
+        case(
+            "v1 list with Tor bridges",
+            s1(with(
+                v1(ISSUED, EXPIRES),
+                &["tor_bridges"],
+                json!(["obfs4 x"]),
+            )),
+            4,
+        ),
+        case(
+            "Tor bridges not a list of strings",
+            s2(with(v2(ISSUED, EXPIRES), &["tor_bridges"], json!([1, 2]))),
+            4,
+        ),
         case(
             "empty target URL",
             s2(with(

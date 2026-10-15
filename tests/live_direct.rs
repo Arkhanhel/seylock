@@ -75,6 +75,7 @@ fn policy(paths: Vec<PathSpec>) -> Policy {
             }),
             services: Default::default(),
             paths,
+            tor_bridges: Vec::new(),
         },
         memory: PathMemory::default(),
         network_id: "live".into(),

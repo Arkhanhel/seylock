@@ -62,7 +62,7 @@ development builds for Android, iOS and macOS, not yet in a store release.
 | `cdn` | A name hosted behind a CDN that forwards to the server | done |
 | `proxy` | TLS to a volunteer proxy, then TLS to the server inside it, as in Signal's proxy design | done |
 | `socks` | SOCKS5, for example a local Tor or a user's own proxy | done |
-| `tor` | Built-in Tor client (arti) | planned |
+| `tor` | Tor, from the separate [`seylock-tor`](https://github.com/Arkhanhel/seylock/tree/main/tor) crate (arti), only when the app allows it | done |
 
 ## What it does not do
 
@@ -151,7 +151,7 @@ repository under `server/proxy/tlsproxy/`.
 | Check | What it shows |
 |---|---|
 | `cargo test` | Unit and integration tests, including racing, and the README example compiled as a doctest. |
-| `test-vectors/endpoints.json` | 47 signed lists with the result each must give, written by hand from PROTOCOL.md. |
+| `test-vectors/endpoints.json` | 55 signed lists with the result each must give, written by hand from PROTOCOL.md. |
 | `tools/verify_vectors.py` | A second implementation in plain Python, with its own Ed25519 from RFC 8032 and no third-party code, agreeing on every vector. |
 | `tests/robustness.rs`, `fuzz/` | Damaged and extreme input never panics; four fuzz targets run nightly in CI. |
 | `tools/check_reproducible.sh` | Two builds from different directories give byte-identical libraries. |
@@ -185,8 +185,9 @@ described in [SECURITY.md](SECURITY.md).
 
 - **Packages for mobile developers:** Kotlin and Swift bindings, an Android
   AAR on Maven Central and a Swift package.
-- **Tor through `arti`**, including volunteer bridges (obfs4, WebTunnel,
-  Snowflake), enabled only with the user's consent.
+- **Bridges in the signed list:** Tor bridge lines distributed and rotated
+  like the other ways in. Today `seylock-tor` takes them from the
+  application.
 - **Less recognisable TLS:** Encrypted Client Hello where the CDN supports
   it, and a measured look at browser-like ClientHellos.
 - **Open blocking statistics:** which ways in work on which networks,

@@ -1,0 +1,55 @@
+[package]
+name = "seylock-tor"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+authors = ["Yurii Arkhanhelskyi"]
+license = "MPL-2.0"
+description = "Tor for SeyLock's `tor` path, built on the Tor Project's arti: bootstraps in the background, supports bridges through pluggable transports."
+repository = "https://github.com/Arkhanhel/seylock"
+homepage = "https://github.com/Arkhanhel/seylock"
+documentation = "https://docs.rs/seylock-tor"
+readme = "README.md"
+keywords = ["tor", "arti", "censorship", "circumvention", "proxy"]
+categories = ["network-programming"]
+
+# A package of its own, outside the core's dependency tree: Tor brings
+# hundreds of dependencies that applications without Tor should not carry.
+[workspace]
+
+[lib]
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[features]
+default = []
+# Compile SQLite into the library for arti's directory cache. Use it on
+# Android, where the NDK has no public SQLite. Do NOT use it on iOS or macOS
+# next to SQLCipher: two copies of the `sqlite3_*` functions in one process
+# can silently replace the encrypted database engine with the plain one.
+bundled-sqlite = ["arti-client/static-sqlite"]
+
+[dependencies]
+seylock = { path = "..", version = "0.1.2" }
+arti-client = { version = "0.47", default-features = false, features = ["tokio", "rustls", "compression", "bridge-client", "pt-client"] }
+tor-rtcompat = { version = "0.47", default-features = false, features = ["tokio", "rustls"] }
+futures = "0.3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "macros"] }
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "client"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+bytes = "1"
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+strip = "none"

@@ -45,6 +45,12 @@ pub const MAX_SERVICES: usize = 16;
 /// Longest service name in a format 2 list, in bytes.
 pub const MAX_SERVICE_NAME_LEN: usize = 32;
 
+/// Most Tor bridge lines a format 2 list may carry.
+pub const MAX_TOR_BRIDGES: usize = 32;
+
+/// Longest Tor bridge line, in bytes.
+pub const MAX_TOR_BRIDGE_LEN: usize = 2048;
+
 /// The two services of format 1. Format 2 names services with plain strings;
 /// [`Upstream::as_str`] gives the name these two have there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -296,6 +302,13 @@ pub struct EndpointList {
     /// Ways to reach the servers, in any order; the probe order is set by
     /// [`crate::paths`]. A list with no paths is rejected.
     pub paths: Vec<PathSpec>,
+    /// Format 2: Tor bridge lines (`obfs4 ...`, `webtunnel ...`), handed to
+    /// the installed Tor connector (see [`crate::tor`]) so that bridges are
+    /// distributed and rotated like the other ways in. At most
+    /// [`MAX_TOR_BRIDGES`], each 1 to [`MAX_TOR_BRIDGE_LEN`] bytes of
+    /// printable ASCII. The library does not parse them; the connector does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tor_bridges: Vec<String>,
 }
 
 impl EndpointList {
@@ -355,6 +368,9 @@ pub enum EndpointError {
     /// Format 2: a path gives an address for a service the list does not
     /// name. Code 10.
     UnknownService,
+    /// Format 2: more than [`MAX_TOR_BRIDGES`] Tor bridge lines, or one that
+    /// is empty, too long or not printable ASCII. Code 11.
+    TorBridge,
 }
 
 impl EndpointError {
@@ -371,6 +387,7 @@ impl EndpointError {
             EndpointError::Empty => 8,
             EndpointError::ServiceName => 9,
             EndpointError::UnknownService => 10,
+            EndpointError::TorBridge => 11,
         }
     }
 }
@@ -440,7 +457,7 @@ pub fn verify_and_parse(
 /// that every service a path refers to exists.
 fn check_shape(list: &EndpointList) -> Result<(), EndpointError> {
     if list.v == 1 {
-        if !list.services.is_empty() {
+        if !list.services.is_empty() || !list.tor_bridges.is_empty() {
             return Err(EndpointError::Document);
         }
         for p in &list.paths {
@@ -506,6 +523,14 @@ fn check_shape(list: &EndpointList) -> Result<(), EndpointError> {
         {
             return Err(EndpointError::UnknownService);
         }
+    }
+    let bridge_ok = |b: &String| {
+        !b.is_empty()
+            && b.len() <= MAX_TOR_BRIDGE_LEN
+            && b.bytes().all(|c| (0x20..=0x7e).contains(&c))
+    };
+    if list.tor_bridges.len() > MAX_TOR_BRIDGES || !list.tor_bridges.iter().all(bridge_ok) {
+        return Err(EndpointError::TorBridge);
     }
     Ok(())
 }
@@ -583,6 +608,7 @@ mod tests {
                 },
                 PathSpec::Tor,
             ],
+            tor_bridges: Vec::new(),
         })
         .unwrap()
     }
@@ -675,6 +701,7 @@ mod tests {
             }),
             services: Default::default(),
             paths: vec![],
+            tor_bridges: Vec::new(),
         })
         .unwrap();
         assert_eq!(
@@ -844,6 +871,47 @@ mod tests {
         let d = doc(1_000, 2_000_000).replace(",\"relay\":\"https://m1.example.net/r\"", "");
         assert_eq!(
             verify_and_parse(&sign(&k, &d), &pub_b64(&k), 1_500, 0),
+            Err(EndpointError::Document)
+        );
+    }
+
+    #[test]
+    fn v2_tor_bridges_are_checked_but_not_parsed() {
+        let k = key();
+        let base = |bridges: serde_json::Value| {
+            let mut d: serde_json::Value = serde_json::from_str(&v2_doc(
+                &[("api", "https://a")],
+                serde_json::json!([{"kind": "tor"}]),
+            ))
+            .unwrap();
+            d["tor_bridges"] = bridges;
+            sign_v2(&k, &d.to_string())
+        };
+        let line =
+            "obfs4 192.0.2.1:443 0123456789ABCDEF0123456789ABCDEF01234567 cert=AAAA iat-mode=0";
+        let list =
+            verify_and_parse(&base(serde_json::json!([line])), &pub_b64(&k), 1_500, 0).unwrap();
+        assert_eq!(list.tor_bridges, vec![line.to_string()]);
+        let too_many: Vec<&str> = std::iter::repeat_n(line, MAX_TOR_BRIDGES + 1).collect();
+        let long = "x".repeat(MAX_TOR_BRIDGE_LEN + 1);
+        for bad in [
+            serde_json::json!(too_many),
+            serde_json::json!([""]),
+            serde_json::json!(["obfs4 a\nb"]),
+            serde_json::json!(["obfs4 caf\u{e9}"]),
+            serde_json::json!([long]),
+        ] {
+            assert_eq!(
+                verify_and_parse(&base(bad.clone()), &pub_b64(&k), 1_500, 0),
+                Err(EndpointError::TorBridge),
+                "{bad}"
+            );
+        }
+        // Format 1 has no bridges.
+        let d1 =
+            doc(1_000, 2_000_000).replace("\"paths\"", "\"tor_bridges\":[\"obfs4 x\"],\"paths\"");
+        assert_eq!(
+            verify_and_parse(&sign(&k, &d1), &pub_b64(&k), 1_500, 0),
             Err(EndpointError::Document)
         );
     }

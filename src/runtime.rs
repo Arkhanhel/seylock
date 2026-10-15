@@ -18,6 +18,13 @@ use crate::proxy::{self, Policy, ProxyHandle, Race};
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static PROXY: Mutex<Option<ProxyHandle>> = Mutex::new(None);
 
+/// A handle to the process-wide runtime the proxy runs on. A companion crate
+/// such as `seylock-tor` uses it to run its own tasks (bootstrapping Tor)
+/// beside the proxy instead of starting a second runtime.
+pub fn handle() -> tokio::runtime::Handle {
+    runtime().handle().clone()
+}
+
 fn runtime() -> &'static tokio::runtime::Runtime {
     RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -91,6 +98,10 @@ pub struct Status {
     pub memory: PathMemory,
     /// `issued_at_ms` of the list in use, in Unix milliseconds.
     pub issued_at_ms: i64,
+    /// State of the installed Tor connector (see [`crate::tor`]). Absent
+    /// from the JSON when no connector is installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tor: Option<crate::tor::TorState>,
 }
 
 /// Failure of a runtime call, each with a numeric [`code`](RuntimeError::code)
@@ -211,6 +222,7 @@ pub fn status() -> Result<Status, RuntimeError> {
         network_id: p.network_id,
         memory: p.memory,
         issued_at_ms: p.list.issued_at_ms,
+        tor: crate::tor::state(),
     })
 }
 
@@ -231,6 +243,7 @@ mod tests {
                 }),
                 services: Default::default(),
                 paths: vec![PathSpec::Direct],
+                tor_bridges: Vec::new(),
             },
             memory: PathMemory::default(),
             network_id: "wifi:test".into(),
@@ -238,6 +251,31 @@ mod tests {
             allow_socks: false,
             race: Race::SEQUENTIAL,
         }
+    }
+
+    #[test]
+    fn status_json_has_no_tor_field_without_a_connector() {
+        // Applications that read the status today must see no new field
+        // unless they install a Tor connector.
+        let status = Status {
+            port: 1,
+            current: None,
+            current_kind: None,
+            network_id: String::new(),
+            memory: PathMemory::default(),
+            issued_at_ms: 0,
+            tor: None,
+        };
+        assert!(!serde_json::to_string(&status).unwrap().contains("tor"));
+        let ready = Status {
+            tor: Some(crate::tor::TorState::Bootstrapping { percent: 40 }),
+            ..status
+        };
+        assert!(
+            serde_json::to_string(&ready)
+                .unwrap()
+                .contains(r#""tor":{"state":"bootstrapping","percent":40}"#)
+        );
     }
 
     #[test]

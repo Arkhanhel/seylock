@@ -17,6 +17,8 @@
 //! - [`proxy`]: a local reverse proxy on loopback. The client talks plain
 //!   HTTP to loopback; the proxy does the outbound TLS and picks the path;
 //! - [`runtime`]: a process-wide runtime that owns the running proxy;
+//! - [`tor`]: the hook through which a separate crate supplies a Tor client
+//!   for the `tor` path;
 //! - [`ffi`]: a C ABI for non-Rust clients such as Dart/Flutter.
 
 #![deny(missing_docs)]
@@ -27,6 +29,7 @@ pub mod ffi;
 pub mod paths;
 pub mod proxy;
 pub mod runtime;
+pub mod tor;
 
 // Compiles the Rust examples in README.md as doctests, so the README cannot
 // drift from the API.

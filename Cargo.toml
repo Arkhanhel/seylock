@@ -1,6 +1,6 @@
 [package]
 name = "seylock"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.93"
 authors = ["Yurii Arkhanhelskyi"]
@@ -14,7 +14,7 @@ documentation = "https://docs.rs/seylock"
 homepage = "https://github.com/Arkhanhel/seylock"
 keywords = ["censorship", "circumvention", "proxy", "happy-eyeballs", "transport"]
 categories = ["network-programming", "cryptography", "web-programming::http-client"]
-exclude = ["target/", "*.signed.json", "fuzz/"]
+exclude = ["target/", "*.signed.json", "fuzz/", "tor/"]
 
 # Self-contained: in the Secretly monorepo this crate is built by cargokit
 # from inside a Flutter plugin, so it declares its own empty workspace and
