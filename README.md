@@ -1,30 +1,49 @@
 # SeyLock
 
-Reach your own servers from networks that block them.
+[![crates.io](https://img.shields.io/crates/v/seylock.svg)](https://crates.io/crates/seylock)
+[![docs.rs](https://img.shields.io/docsrs/seylock)](https://docs.rs/seylock)
+[![CI](https://github.com/Arkhanhel/seylock/actions/workflows/ci.yml/badge.svg)](https://github.com/Arkhanhel/seylock/actions/workflows/ci.yml)
+[![License: MPL-2.0](https://img.shields.io/badge/license-MPL--2.0-blue.svg)](LICENSE)
 
-SeyLock (crate `seylock`) is a small library for any application, not only
-messengers, whose users live behind censorship. It runs a reverse proxy on
-`127.0.0.1` inside the app. The app sends its ordinary HTTP and WebSocket requests to that port.
-The library decides how to reach the real server: directly, by a pinned IP
-address, through a mirror domain, through a CDN-hosted name, through a
-volunteer TLS proxy, or through a SOCKS5 proxy such as a local Tor client.
-Paths race at the connection stage, so a silently blocked path does not hold
-up a working one: on a network that drops `direct` and `ip`, the first request
-takes half a second instead of twelve ([measurements](RACE_LAB.md)). The
-library remembers which path worked on which network, so the next start on
-the same network goes straight to it.
+**Reach your own servers from networks that block them.**
 
-The list of ways in is signed with an offline Ed25519 key. A client accepts
-a new list only if the signature checks out and the list is newer than the
-one it has. A censor who can tamper with traffic cannot feed the app a
-list that leads to a server they control.
+SeyLock is a small Rust library for applications whose users live behind
+censorship. The application keeps sending ordinary HTTP and WebSocket
+requests; SeyLock finds a way through and carries them.
 
-SeyLock only moves bytes and picks the road. It never needs to see an
-application's content, and it is meant to sit under the application's own
-encryption. A list names any services the application has (`api`, `media`,
-...), so nothing in it is tied to one product.
+## Who it is for
 
-It was built for, and is used by, [Secretly](https://github.com/Arkhanhel/Secretly),
+- **Apps under censorship.** Messengers, newsrooms' apps, human-rights tools,
+  anything with its own servers and users in countries that block them.
+- **Teams without a networking specialist.** One signed list of ways in, one
+  local port, and the library does the rest.
+- **Any language.** A C ABI, used from Dart in production, callable from C,
+  C++, Swift and Go directly and from Kotlin or Java through JNI or JNA.
+
+## How it works
+
+SeyLock runs a reverse proxy on `127.0.0.1` inside the app and decides how to
+reach the real server: directly, by a pinned IP address, through a mirror
+domain, through a CDN-hosted name, through a volunteer TLS proxy, or through
+a SOCKS5 proxy such as a local Tor client.
+
+- **Paths race at the connection stage.** A silently blocked path does not
+  hold up a working one: on a network that drops `direct` and `ip`, the first
+  request takes half a second instead of twelve
+  ([measurements](RACE_LAB.md)). Requests themselves never race, so nothing is
+  sent twice.
+- **It remembers each network.** The path that worked at home, on mobile data
+  or at a café is tried first the next time.
+- **The list of ways in is signed** with an offline Ed25519 key, and only a
+  newer list replaces the current one. A censor who can tamper with traffic
+  cannot point the app at a server they control, nor roll it back to
+  addresses that are already blocked.
+- **It never needs to see content.** SeyLock moves bytes and picks the road;
+  it sits under the application's own encryption. A list names whatever
+  services the application has (`api`, `media`, ...), so nothing in it is
+  tied to one product.
+
+SeyLock was built for, and is used by, [Secretly](https://github.com/Arkhanhel/Secretly),
 an end-to-end encrypted messenger, where messages are encrypted before they
 reach SeyLock and every request is signed by the device key. It does not
 depend on Secretly's servers: the addresses come from the signed list you give
@@ -32,9 +51,8 @@ it.
 
 ## Status
 
-Version 0.1. It is built into the Secretly apps for Android, iOS and
-macOS; the first public release that includes it is being prepared. Windows
-and Linux builds are set up but not yet tested.
+Version 0.1. Tested in CI on Linux, macOS and Windows; built into Secretly's
+development builds for Android, iOS and macOS, not yet in a store release.
 
 | Path | What it does | Status |
 |---|---|---|
@@ -165,10 +183,15 @@ described in [SECURITY.md](SECURITY.md).
 
 ## Roadmap
 
-- A built-in Tor client through `arti`, enabled by a server flag.
-- A TLS ClientHello that looks like a common browser.
-- Path statistics in a form that is safe to publish, for measuring
-  censorship by country.
+- **Packages for mobile developers:** Kotlin and Swift bindings, an Android
+  AAR on Maven Central and a Swift package.
+- **Tor through `arti`**, including volunteer bridges (obfs4, WebTunnel,
+  Snowflake), enabled only with the user's consent.
+- **Less recognisable TLS:** Encrypted Client Hello where the CDN supports
+  it, and a measured look at browser-like ClientHellos.
+- **Open blocking statistics:** which ways in work on which networks,
+  aggregated, opt-in, and published only after review of the privacy risks.
+- **An independent security audit.**
 
 ## License
 

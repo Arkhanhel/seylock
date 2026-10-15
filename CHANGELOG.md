@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.1.1 (unreleased)
+## Unreleased
+
+- README: who the library is for, how it works, badges, an up-to-date status
+  and roadmap.
+
+## 0.1.1 — 15 October 2026
+
+First release on crates.io.
 
 - rustls 0.23.46, for RUSTSEC-2026-0346, -0347, -0348 and -0349 (published
   14 October 2026). None of them reaches SeyLock as built: it does not use
@@ -10,7 +17,7 @@
   clean.
 - CI: the dependency audit job has the permission it needs to report.
 
-## 0.1.0
+## 0.1.0 — 15 October 2026 (GitHub only, not published to crates.io)
 
 First public version, under the name SeyLock (crate `seylock`). It was
 developed inside the Secretly messenger as `secretly_transport`; the C ABI
