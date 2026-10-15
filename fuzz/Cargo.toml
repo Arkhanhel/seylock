@@ -1,0 +1,52 @@
+# Fuzz targets for cargo-fuzz (needs a nightly toolchain):
+#
+#   cargo +nightly fuzz run list_document -- -max_total_time=60
+#
+# CI runs every target for a few minutes each night.
+[package]
+name = "seylock-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MPL-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ed25519-dalek = "2"
+base64 = "0.22"
+serde_json = "1"
+seylock = { path = ".." }
+
+# Not part of the parent workspace.
+[workspace]
+
+[[bin]]
+name = "list_envelope"
+path = "fuzz_targets/list_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "list_document"
+path = "fuzz_targets/list_document.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "path_memory"
+path = "fuzz_targets/path_memory.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "policy_json"
+path = "fuzz_targets/policy_json.rs"
+test = false
+doc = false
+bench = false

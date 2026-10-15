@@ -1,0 +1,74 @@
+[package]
+name = "seylock"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+authors = ["Yurii Arkhanhelskyi"]
+repository = "https://github.com/Arkhanhel/seylock"
+# The library is MPL-2.0 so that other apps can use it; the Secretly app
+# itself is AGPL-3.0.
+license = "MPL-2.0"
+description = "Reach your own servers from networks that block them: signed lists of ways in, paths that race, a local reverse proxy."
+readme = "README.md"
+documentation = "https://docs.rs/seylock"
+homepage = "https://github.com/Arkhanhel/seylock"
+keywords = ["censorship", "circumvention", "proxy", "happy-eyeballs", "transport"]
+categories = ["network-programming", "cryptography", "web-programming::http-client"]
+exclude = ["target/", "*.signed.json", "fuzz/"]
+
+# Self-contained: in the Secretly monorepo this crate is built by cargokit
+# from inside a Flutter plugin, so it declares its own empty workspace and
+# does not inherit settings from the repository root.
+[workspace]
+
+[lib]
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[dependencies]
+base64 = "0.22"
+bytes = "1"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "client", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+rand = "0.9"
+# `ring` rather than `aws-lc-rs`: the latter needs cmake and NASM to
+# cross-compile for Android and iOS.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+tokio-socks = "0.5"
+tracing = "0.1"
+webpki-roots = "1"
+
+[dev-dependencies]
+rand = "0.9"
+
+# The library's size shows up in every application package, so releases are
+# optimised for size rather than speed: `ring` does the cryptography and TLS,
+# and the network remains the bottleneck.
+#
+# Do NOT set `panic = "abort"`. The C ABI boundary catches panics
+# (`catch_unwind` in `ffi.rs`) and turns them into an error code; otherwise a
+# panic in the library would kill the whole application. With `abort` there
+# would be nothing left to catch.
+#
+# Nothing is stripped (`strip = "none"`, overriding Cargo's default of
+# stripping debug info when it is off):
+# - With Xcode 27 (ld-27037) the stripped macOS dynamic library does not load:
+#   dyld refuses it with "mis-aligned LINKEDIT string pool". Unstripped it
+#   loads, at about 170 KB more.
+# - The Android build puts the symbol table into the bundle, and without it
+#   native frames in crash reports are bare addresses. Android packaging
+#   strips libraries on its own, so applications lose nothing in size.
+# - Static libraries, which iOS and macOS applications link, are not affected
+#   either way.
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+strip = "none"

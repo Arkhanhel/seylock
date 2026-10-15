@@ -1,0 +1,25 @@
+{
+  "v": 1,
+  "issued_at_ms": 1791590400000,
+  "expires_at_ms": 1823126400000,
+  "logical": {
+    "keys": "https://keys.example.org",
+    "relay": "https://relay.example.org"
+  },
+  "paths": [
+    { "kind": "direct" },
+    { "kind": "ip", "ip": "203.0.113.10" },
+    {
+      "kind": "mirror",
+      "keys": "https://k.mirror-one.example.net",
+      "relay": "https://r.mirror-one.example.net"
+    },
+    {
+      "kind": "cdn",
+      "keys": "https://keys.cdn-fronted.example.com",
+      "relay": "https://relay.cdn-fronted.example.com"
+    },
+    { "kind": "proxy", "host": "volunteer.example.org", "port": 443 },
+    { "kind": "socks", "addr": "127.0.0.1:9050" }
+  ]
+}
