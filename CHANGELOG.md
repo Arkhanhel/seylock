@@ -1,6 +1,16 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.1 (unreleased)
+
+- rustls 0.23.46, for RUSTSEC-2026-0346, -0347, -0348 and -0349 (published
+  14 October 2026). None of them reaches SeyLock as built: it does not use
+  ECH (0347), does not enable the `brotli` feature (0348), uses the `ring`
+  provider, which offers no post-quantum group to downgrade from (0349), and
+  never formats session values (0346). The update keeps the dependency audit
+  clean.
+- CI: the dependency audit job has the permission it needs to report.
+
+## 0.1.0
 
 First public version, under the name SeyLock (crate `seylock`). It was
 developed inside the Secretly messenger as `secretly_transport`; the C ABI

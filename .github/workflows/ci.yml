@@ -47,7 +47,13 @@ jobs:
       - run: cargo test --locked
 
   audit:
+    # Fails on any RustSec advisory against Cargo.lock. Runs on every push and
+    # nightly, so a new advisory surfaces without a code change. It reports
+    # through a check run, which needs write access to checks.
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2
