@@ -55,8 +55,17 @@ an hour.
 
 ## Status
 
-Version 0.1. Tested in CI on Linux, macOS and Windows; built into Secretly's
-development builds for Android, iOS and macOS, not yet in a store release.
+Version 0.2.0 (October 2026). Published on
+[crates.io](https://crates.io/crates/seylock) (with
+[`seylock-tor`](https://crates.io/crates/seylock-tor)), as a Swift package
+and an Android library attached to the
+[release](https://github.com/Arkhanhel/seylock/releases/tag/v0.2.0).
+
+It is tested in CI on Linux, macOS and Windows, with the Swift package
+tests on macOS, the Android library tests on the JVM, and an iOS simulator
+build. The Android device tests run on an emulator before each release. It is built into Secretly's development builds for Android,
+iOS and macOS, not yet in a store release. There has been no external audit
+yet; [AUDIT.md](AUDIT.md) is the guide for one.
 
 | Path | What it does | Status |
 |---|---|---|
@@ -256,13 +265,22 @@ described in [SECURITY.md](SECURITY.md).
 
 ## Roadmap
 
-- **The AAR on Maven Central** (today it is a release asset, as the
-  XCFramework is for the Swift package).
-- **Less recognisable TLS:** Encrypted Client Hello where the CDN supports
-  it, and a measured look at browser-like ClientHellos.
+- **Stream mode:** raw TCP and TLS through the same signed paths, for
+  protocols that are not HTTP (IMAP and SMTP, XMPP, messenger protocols).
+- **Proxyless and less recognisable TLS:**
+  - ClientHello fragmentation against filtering by server name;
+  - Encrypted Client Hello where the CDN supports it;
+  - a published JA4 fingerprint report.
+- **A racing delay derived from measured handshakes**, so slow networks stop
+  paying for racing in extra connections ([RACE_LAB.md](RACE_LAB.md)).
+- **Integrations in existing open-source apps**, and a Dart/Flutter package.
 - **Open blocking statistics:** which ways in work on which networks,
   aggregated, opt-in, and published only after review of the privacy risks.
-- **An independent security audit.**
+- **The AAR on Maven Central** (today it is a release asset, as the
+  XCFramework is for the Swift package).
+- **An external security audit** ([AUDIT.md](AUDIT.md)).
+
+Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
