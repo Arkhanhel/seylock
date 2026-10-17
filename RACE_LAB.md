@@ -111,8 +111,65 @@ tools/netem_lab.sh 3 1        # a quick check
 | D | nothing blocked, slow network: RTT 800 ms, 5 % loss each way |
 | E | nothing blocked, ordinary network: RTT 100 ms |
 
-The results table goes here from a full run: CI → `lab` job → artifact
-`netem-lab`, or a run on any Linux machine.
+### Results
+
+17 October 2026. GitHub Actions `ubuntu-24.04`, Linux 6.17.0-1022-azure,
+Rust 1.99.1. Each racing row is 100 cold runs and each one-at-a-time row is
+10, since one path at a time only adds up timeouts. Every request got an
+answer.
+
+"Connections" counts the TCP connections the server accepted per request, so
+it shows what racing costs the server.
+
+| Scenario | Mode | Median, s | 95th pct, s | Max, s | Connections | Answered by |
+|---|---|---:|---:|---:|---:|---|
+| A | one at a time (0.1) | 12.31 | 12.40 | 12.40 | 1.00 | mirror |
+| A | **racing (default)** | **0.80** | 0.81 | 0.81 | 1.00 | mirror |
+| A | racing, 5 at once | 0.80 | 0.81 | 0.81 | 1.00 | mirror |
+| A | racing, 1 s apart | 2.31 | 2.31 | 2.31 | 1.00 | mirror |
+| B | one at a time (0.1) | 0.60 | 0.80 | 0.80 | 4.00 | cdn |
+| B | **racing (default)** | **0.60** | 0.60 | 0.60 | 4.00 | cdn |
+| B | racing, 5 at once | 0.60 | 0.60 | 0.75 | 3.99 | cdn |
+| B | racing, 1 s apart | 0.60 | 0.60 | 0.61 | 4.00 | cdn |
+| C | one at a time (0.1) | 36.41 | 36.51 | 36.51 | 1.00 | proxy |
+| C | **racing (default)** | **6.66** | 6.66 | 6.66 | 1.00 | proxy |
+| C | racing, 5 at once | 1.41 | 1.41 | 1.41 | 1.00 | proxy |
+| C | racing, 1 s apart | 7.41 | 7.41 | 7.41 | 1.00 | proxy |
+| D | one at a time (0.1) | 2.40 | 6.91 | 6.91 | 1.00 | direct |
+| D | **racing (default)** | **2.40** | 5.04 | 6.08 | **2.73** | direct 89, ip 10, mirror 1 |
+| D | racing, 5 at once | 2.40 | 5.02 | 5.88 | 3.93 | direct 81, ip 15, mirror 4 |
+| D | racing, 1 s apart | 2.40 | 5.07 | 8.29 | 1.19 | direct 85, ip 15 |
+| E | one at a time (0.1) | 0.30 | 0.30 | 0.30 | 1.00 | direct |
+| E | **racing (default)** | **0.30** | 0.30 | 0.30 | 1.00 | direct |
+| E | racing, 5 at once | 0.30 | 0.30 | 0.30 | 1.00 | direct |
+| E | racing, 1 s apart | 0.30 | 0.30 | 0.30 | 1.00 | direct |
+
+### What the Linux numbers say
+
+- **With real TLS and a 100 ms round trip, the loopback results hold.**
+  - Scenario A goes from 12.3 s to 0.8 s.
+  - Scenario C goes from 36.4 s to 6.7 s with the default, and to 1.4 s with
+    five attempts at once.
+
+  The successful paths now pay for TCP and TLS round trips, which loopback
+  could not show.
+- **A reset by server name costs one connection per blocked path, in any
+  mode (B).** The censor lets the TCP handshake through and resets on the
+  ClientHello, so the server sees `direct`, `ip` and `mirror` connect before
+  the CDN name answers. Racing changes nothing here: resets are fast either
+  way.
+- **On a slow open network (D) racing costs connections, not time.**
+  - The median is the same in every mode, 2.4 s, and racing shortens the tail
+    a little (95th percentile 5.0 s against 6.9 s one at a time, from only 10
+    runs).
+  - The cost: with the default 250 ms, a TLS handshake over an 800 ms round
+    trip lets two more attempts start, so the server gets 2.7 connections per
+    request instead of 1.
+  - With 1 s between starts it gets 1.2, with nearly the same tail.
+  - Next step: derive the delay from handshake times measured on the
+    network, as RFC 8305 allows, so slow networks stop paying for racing.
+- **On an ordinary network (E) racing costs nothing:** 0.3 s and one
+  connection, in every mode.
 
 ## Still to measure
 
