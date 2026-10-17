@@ -11,7 +11,9 @@ set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 cd "$here"
 cargo build --release --lib --quiet
-native=$(cargo rustc --release --lib --quiet -- --print native-static-libs 2>&1 \
+# No colour: with CARGO_TERM_COLOR=always (as in CI) the note carries escape
+# codes that would end up in the linker flags.
+native=$(cargo rustc --release --lib --quiet --color never -- --print native-static-libs 2>&1 \
     | sed -n 's/.*native-static-libs: //p' | tail -1)
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
