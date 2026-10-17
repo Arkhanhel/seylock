@@ -1,0 +1,8 @@
+/target/
+/tor/target/
+/fuzz/target/
+# Swift Package Manager
+/.build/
+/.swiftpm/
+# Built locally by tools/build_xcframework.sh; releases attach the zip.
+/bindings/swift/SeyLockFFI.xcframework/

@@ -388,6 +388,62 @@
       "name": "empty target URL",
       "now_ms": 1800000000000,
       "signed": "{\"doc\":\"{\\\"expires_at_ms\\\":1802592000000,\\\"issued_at_ms\\\":1799999940000,\\\"paths\\\":[{\\\"kind\\\":\\\"direct\\\"},{\\\"kind\\\":\\\"mirror\\\",\\\"targets\\\":{\\\"api\\\":\\\"https://a.mirror.example.net\\\",\\\"media\\\":\\\"https://m.mirror.example.net\\\"}},{\\\"kind\\\":\\\"cdn\\\",\\\"targets\\\":{\\\"api\\\":\\\"\\\"}},{\\\"host\\\":\\\"volunteer.example.org\\\",\\\"kind\\\":\\\"proxy\\\",\\\"port\\\":8443}],\\\"services\\\":{\\\"api\\\":\\\"https://api.example.org\\\",\\\"media\\\":\\\"https://media.example.org\\\"},\\\"v\\\":2}\",\"sig_b64\":\"gRo8pF0JYOCNDByahC4H5/54Xf5Df+l37fhwCUhclOWVjQvIdXhUQmsqMX+uRmNs1Vh7nU4BWl/TUYL2mkYnDA==\"}"
+    },
+    {
+      "current_issued_at_ms": 0,
+      "expect": 4,
+      "name": "repeated key in the document",
+      "now_ms": 1800000000000,
+      "signed": "{\"doc\":\"{\\\"expires_at_ms\\\":1802592000000,\\\"issued_at_ms\\\":1799999940000,\\\"paths\\\":[{\\\"kind\\\":\\\"direct\\\"},{\\\"kind\\\":\\\"mirror\\\",\\\"targets\\\":{\\\"api\\\":\\\"https://a.mirror.example.net\\\",\\\"media\\\":\\\"https://m.mirror.example.net\\\"}},{\\\"kind\\\":\\\"cdn\\\",\\\"targets\\\":{\\\"api\\\":\\\"https://api.cdn.example.com\\\"}},{\\\"host\\\":\\\"volunteer.example.org\\\",\\\"kind\\\":\\\"proxy\\\",\\\"port\\\":8443}],\\\"services\\\":{\\\"api\\\":\\\"https://api.example.org\\\",\\\"media\\\":\\\"https://media.example.org\\\"},\\\"v\\\":2,\\\"v\\\":2}\",\"sig_b64\":\"NIEbpLxsa3b6A+tFLm/0T+zNihhvfdtp0WT9w1XVVcw0qZnx6okWUTqilqpovINASz6NlxxeMjLgeRcGVfKIBg==\"}"
+    },
+    {
+      "current_issued_at_ms": 0,
+      "expect": 4,
+      "name": "repeated service name",
+      "now_ms": 1800000000000,
+      "signed": "{\"doc\":\"{\\\"expires_at_ms\\\":1802592000000,\\\"issued_at_ms\\\":1799999940000,\\\"paths\\\":[{\\\"kind\\\":\\\"direct\\\"},{\\\"kind\\\":\\\"mirror\\\",\\\"targets\\\":{\\\"api\\\":\\\"https://a.mirror.example.net\\\",\\\"media\\\":\\\"https://m.mirror.example.net\\\"}},{\\\"kind\\\":\\\"cdn\\\",\\\"targets\\\":{\\\"api\\\":\\\"https://api.cdn.example.com\\\"}},{\\\"host\\\":\\\"volunteer.example.org\\\",\\\"kind\\\":\\\"proxy\\\",\\\"port\\\":8443}],\\\"services\\\":{\\\"api\\\":\\\"https://evil.example.org\\\",\\\"api\\\":\\\"https://api.example.org\\\",\\\"media\\\":\\\"https://media.example.org\\\"},\\\"v\\\":2}\",\"sig_b64\":\"veesXkdQe6gCgH4i5/th1sEWW0aP3YgOEgQP3kylM4sKUHFD4sniK07f7BA+VpRvejqY+lEexICnn8Doi8kDBg==\"}"
+    },
+    {
+      "current_issued_at_ms": 0,
+      "expect": 4,
+      "name": "repeated service in a mirror's targets",
+      "now_ms": 1800000000000,
+      "signed": "{\"doc\":\"{\\\"expires_at_ms\\\":1802592000000,\\\"issued_at_ms\\\":1799999940000,\\\"paths\\\":[{\\\"kind\\\":\\\"direct\\\"},{\\\"kind\\\":\\\"mirror\\\",\\\"targets\\\":{\\\"api\\\":\\\"https://evil.example.org\\\",\\\"api\\\":\\\"https://a.mirror.example.net\\\",\\\"media\\\":\\\"https://m.mirror.example.net\\\"}},{\\\"kind\\\":\\\"cdn\\\",\\\"targets\\\":{\\\"api\\\":\\\"https://api.cdn.example.com\\\"}},{\\\"host\\\":\\\"volunteer.example.org\\\",\\\"kind\\\":\\\"proxy\\\",\\\"port\\\":8443}],\\\"services\\\":{\\\"api\\\":\\\"https://api.example.org\\\",\\\"media\\\":\\\"https://media.example.org\\\"},\\\"v\\\":2}\",\"sig_b64\":\"o6EtguWW7ABJNFTLvwRFrIL+WYD+Ll5xUGJ1gdmg1nQGcKVgtdmsMR+ecj5M5BHTNZ3C6smTFKVk6F+07FaDAw==\"}"
+    },
+    {
+      "current_issued_at_ms": 0,
+      "expect": 1,
+      "name": "repeated key in the envelope",
+      "now_ms": 1800000000000,
+      "signed": "{\"doc\":\"{\\\"expires_at_ms\\\":1802592000000,\\\"issued_at_ms\\\":1799999940000,\\\"paths\\\":[{\\\"kind\\\":\\\"direct\\\"},{\\\"kind\\\":\\\"mirror\\\",\\\"targets\\\":{\\\"api\\\":\\\"https://a.mirror.example.net\\\",\\\"media\\\":\\\"https://m.mirror.example.net\\\"}},{\\\"kind\\\":\\\"cdn\\\",\\\"targets\\\":{\\\"api\\\":\\\"https://api.cdn.example.com\\\"}},{\\\"host\\\":\\\"volunteer.example.org\\\",\\\"kind\\\":\\\"proxy\\\",\\\"port\\\":8443}],\\\"services\\\":{\\\"api\\\":\\\"https://api.example.org\\\",\\\"media\\\":\\\"https://media.example.org\\\"},\\\"v\\\":2}\",\"doc\":\"{\\\"expires_at_ms\\\":1802592000000,\\\"issued_at_ms\\\":1799999940000,\\\"paths\\\":[{\\\"kind\\\":\\\"direct\\\"},{\\\"kind\\\":\\\"mirror\\\",\\\"targets\\\":{\\\"api\\\":\\\"https://a.mirror.example.net\\\",\\\"media\\\":\\\"https://m.mirror.example.net\\\"}},{\\\"kind\\\":\\\"cdn\\\",\\\"targets\\\":{\\\"api\\\":\\\"https://api.cdn.example.com\\\"}},{\\\"host\\\":\\\"volunteer.example.org\\\",\\\"kind\\\":\\\"proxy\\\",\\\"port\\\":8443}],\\\"services\\\":{\\\"api\\\":\\\"https://api.example.org\\\",\\\"media\\\":\\\"https://media.example.org\\\"},\\\"v\\\":2}\",\"sig_b64\":\"SkTOtsPYLw9JGiiZpF96xZ+z4gi89miLFbEIYpPIAA4H7/dPD6in8c95O0975Jqd1ipjhZMpMLPGcHVdAfHaDg==\"}"
+    },
+    {
+      "current_issued_at_ms": 0,
+      "expect": 2,
+      "name": "signature in non-canonical base64",
+      "now_ms": 1800000000000,
+      "signed": "{\"doc\":\"{\\\"expires_at_ms\\\":1802592000000,\\\"issued_at_ms\\\":1799999940000,\\\"paths\\\":[{\\\"kind\\\":\\\"direct\\\"},{\\\"kind\\\":\\\"mirror\\\",\\\"targets\\\":{\\\"api\\\":\\\"https://a.mirror.example.net\\\",\\\"media\\\":\\\"https://m.mirror.example.net\\\"}},{\\\"kind\\\":\\\"cdn\\\",\\\"targets\\\":{\\\"api\\\":\\\"https://api.cdn.example.com\\\"}},{\\\"host\\\":\\\"volunteer.example.org\\\",\\\"kind\\\":\\\"proxy\\\",\\\"port\\\":8443}],\\\"services\\\":{\\\"api\\\":\\\"https://api.example.org\\\",\\\"media\\\":\\\"https://media.example.org\\\"},\\\"v\\\":2}\",\"sig_b64\":\"SkTOtsPYLw9JGiiZpF96xZ+z4gi89miLFbEIYpPIAA4H7/dPD6in8c95O0975Jqd1ipjhZMpMLPGcHVdAfHaDh==\"}"
+    },
+    {
+      "current_issued_at_ms": 0,
+      "expect": 2,
+      "name": "signature without padding",
+      "now_ms": 1800000000000,
+      "signed": "{\"doc\":\"{\\\"expires_at_ms\\\":1802592000000,\\\"issued_at_ms\\\":1799999940000,\\\"paths\\\":[{\\\"kind\\\":\\\"direct\\\"},{\\\"kind\\\":\\\"mirror\\\",\\\"targets\\\":{\\\"api\\\":\\\"https://a.mirror.example.net\\\",\\\"media\\\":\\\"https://m.mirror.example.net\\\"}},{\\\"kind\\\":\\\"cdn\\\",\\\"targets\\\":{\\\"api\\\":\\\"https://api.cdn.example.com\\\"}},{\\\"host\\\":\\\"volunteer.example.org\\\",\\\"kind\\\":\\\"proxy\\\",\\\"port\\\":8443}],\\\"services\\\":{\\\"api\\\":\\\"https://api.example.org\\\",\\\"media\\\":\\\"https://media.example.org\\\"},\\\"v\\\":2}\",\"sig_b64\":\"SkTOtsPYLw9JGiiZpF96xZ+z4gi89miLFbEIYpPIAA4H7/dPD6in8c95O0975Jqd1ipjhZMpMLPGcHVdAfHaDg\"}"
+    },
+    {
+      "current_issued_at_ms": 0,
+      "expect": 0,
+      "name": "v1 with empty v2 fields accepted",
+      "now_ms": 1800000000000,
+      "signed": "{\"doc\":\"{\\\"expires_at_ms\\\":1802592000000,\\\"issued_at_ms\\\":1799999940000,\\\"logical\\\":{\\\"keys\\\":\\\"https://keys.example.org\\\",\\\"relay\\\":\\\"https://relay.example.org\\\"},\\\"paths\\\":[{\\\"kind\\\":\\\"direct\\\"},{\\\"ip\\\":\\\"203.0.113.10\\\",\\\"kind\\\":\\\"ip\\\"},{\\\"keys\\\":\\\"https://k.mirror.example.net\\\",\\\"kind\\\":\\\"mirror\\\",\\\"relay\\\":\\\"https://r.mirror.example.net\\\"},{\\\"keys\\\":\\\"https://keys.cdn.example.com\\\",\\\"kind\\\":\\\"cdn\\\",\\\"relay\\\":\\\"https://relay.cdn.example.com\\\"},{\\\"host\\\":\\\"volunteer.example.org\\\",\\\"kind\\\":\\\"proxy\\\"},{\\\"addr\\\":\\\"127.0.0.1:9050\\\",\\\"kind\\\":\\\"socks\\\"},{\\\"kind\\\":\\\"tor\\\"}],\\\"services\\\":{},\\\"tor_bridges\\\":[],\\\"v\\\":1}\",\"sig_b64\":\"5MpDXqbnQchU8qIQ5WTzgF7SEuQQJQ/X/Ai1XgUxPEh9uOBVlFuXnvXjqKbov4RNqCIUiUNZtdk+YNDFAw5sAA==\"}"
+    },
+    {
+      "current_issued_at_ms": 0,
+      "expect": 0,
+      "name": "v2 with null logical accepted",
+      "now_ms": 1800000000000,
+      "signed": "{\"doc\":\"{\\\"expires_at_ms\\\":1802592000000,\\\"issued_at_ms\\\":1799999940000,\\\"paths\\\":[{\\\"kind\\\":\\\"direct\\\"},{\\\"kind\\\":\\\"mirror\\\",\\\"targets\\\":{\\\"api\\\":\\\"https://a.mirror.example.net\\\",\\\"media\\\":\\\"https://m.mirror.example.net\\\"}},{\\\"kind\\\":\\\"cdn\\\",\\\"targets\\\":{\\\"api\\\":\\\"https://api.cdn.example.com\\\"}},{\\\"host\\\":\\\"volunteer.example.org\\\",\\\"kind\\\":\\\"proxy\\\",\\\"port\\\":8443}],\\\"services\\\":{\\\"api\\\":\\\"https://api.example.org\\\",\\\"media\\\":\\\"https://media.example.org\\\"},\\\"v\\\":2}\",\"sig_b64\":\"SkTOtsPYLw9JGiiZpF96xZ+z4gi89miLFbEIYpPIAA4H7/dPD6in8c95O0975Jqd1ipjhZMpMLPGcHVdAfHaDg==\"}"
     }
   ]
 }

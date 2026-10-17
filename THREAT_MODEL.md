@@ -39,9 +39,12 @@ the reason a request goes to the wrong place or to the wrong party.
   blocked. A list must be strictly newer than the one in use (rule 7).
 - **Reuse a signature made for something else.** The signed message starts
   with a context string, a different one for each format.
-- **Impersonate the server.** Every path verifies the server certificate
-  against the Mozilla root store, and the `ip` path keeps the real name for
-  SNI and verification.
+- **Impersonate the server.** Every `https` target is verified against the
+  Mozilla root store, and the `ip` path keeps the real name for SNI and
+  verification. The list decides the scheme: a signed list may also name
+  `http` base URLs, which exist for loopback testing and carry no
+  certificate check. Nothing stops a signer from publishing them; the signer
+  is trusted anyway (see below), and should not.
 
 **Out of reach of this library:** hiding the TLS fingerprint, traffic shape or
 the fact that the application is in use. The library's aim is to make
@@ -101,7 +104,9 @@ embedding application knows, compared in constant time. The proxy strips the
 token and its own headers before forwarding, so they never reach a server.
 
 Another application can find the port, but cannot use the proxy without the
-token.
+token. Nor can it tie the proxy up: a connection must send its request head
+within 30 seconds or is closed, and a failing `accept` (for example when file
+descriptors run out) backs off instead of spinning.
 
 ### Whoever holds the signing key
 
@@ -128,10 +133,20 @@ library does not pin certificates. Pinning would make a lost or rotated
 certificate a total outage in exactly the networks where re-issuing an update
 is hardest.
 
+The roots are compiled in, and nothing at run time adds to them: not the
+policy, not the C ABI, not the environment. The one exception is the
+`lab-roots` Cargo feature, off by default, which lets the network lab trust
+its own test authority (`seylock::lab`). An application must never enable it.
+Builds of the library for applications, the XCFramework and the Android
+libraries among them, are made without it.
+
 ## The process itself
 
-- **No panic crosses the C ABI.** Every exported function is wrapped in
-  `catch_unwind`; a panic becomes error code 100. The release profile keeps
+- **No panic crosses the C ABI.** Every exported function that does real
+  work is wrapped in `catch_unwind`, and a panic becomes error code 100;
+  `seylock_version` and `seylock_string_free` cannot panic. Functions that
+  take pointers are declared `unsafe` with their contracts, so Rust callers
+  cannot use them by mistake. The release profile keeps
   `panic = "unwind"` for this reason.
 - **Pointers are checked.** Pointer arguments are checked for null, and
   strings for valid UTF-8. Strings the library returns are freed only by
@@ -141,7 +156,10 @@ is hardest.
   rejected or clamped without a panic: `tests/robustness.rs` and four fuzz
   targets in `fuzz/`.
 - **Settings cannot run away.** Racing settings are clamped (10 ms to 5 s,
-  at most 8 attempts), so a bad setting cannot open a flood of connections.
+  at most 8 attempts per request) and so is the response timeout (1 s to
+  10 min). The limit is per request: concurrent requests each race, and
+  upstream connections are not reused, so an application that sends many
+  requests at once opens as many connections as a browser would.
 
 ## Privacy of saved state
 

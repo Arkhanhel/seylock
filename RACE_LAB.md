@@ -75,10 +75,46 @@ So the times for the successful paths here are lower bounds. The savings are
 not: they come from the timeouts of blocked paths, which are the same on any
 network.
 
+## The Linux lab: real TLS, latency and loss
+
+The lab above runs on loopback, so it cannot show what racing costs on a slow
+network that blocks nothing: when a TLS handshake takes longer than 250 ms,
+the next attempt starts, and each extra attempt is an extra connection to a
+server. `tools/netem_lab.sh` measures that on Linux:
+
+```sh
+tools/netem_lab.sh            # 100 runs per row, 10 one at a time
+tools/netem_lab.sh 3 1        # a quick check
+```
+
+- Two network namespaces joined by a virtual cable. The server holds one
+  address per path (`direct`, `ip`, `mirror`, `cdn`, and a volunteer proxy
+  that carries TLS inside TLS); the client resolves the lab names through its
+  own hosts file.
+- Blocking is done by `iptables` in the client's namespace: silent drop by
+  address, and a reset on the server name in the TLS ClientHello, as a
+  censor's DPI does. Latency and loss are `tc netem` on both ends.
+- Everything is real TCP and TLS 1.3 with certificate checks. The client
+  trusts the lab's own certificate authority through the `lab-roots` feature,
+  which no application enables.
+- After every request the client reads the server's counters, so the table
+  shows the connections each request cost the server, by address.
+- The script checks that each scenario was answered only by the paths it
+  leaves open, so a rule that silently failed to apply cannot pass as a
+  result.
+
+| Scenario | Network |
+|---|---|
+| A | `direct` and `ip` silently dropped; RTT 100 ms |
+| B | connections reset on the SNI of `api` and `mirror`; RTT 100 ms |
+| C | everything but the volunteer proxy silently dropped; RTT 100 ms |
+| D | nothing blocked, slow network: RTT 800 ms, 5 % loss each way |
+| E | nothing blocked, ordinary network: RTT 100 ms |
+
+The results table goes here from a full run: CI → `lab` job → artifact
+`netem-lab`, or a run on any Linux machine.
+
 ## Still to measure
 
-- A Linux lab with `iptables` and `tc netem`, real TLS and added latency, to
-  count extra connections on a slow open network. This is the cost of racing
-  that loopback cannot show.
 - Measurements on real censored networks, with the consent of the people
   running them.

@@ -124,10 +124,27 @@ class Reject(Exception):
 
 
 def _b64(text):
+    # Strict: canonical padding and no stray bits, so exactly one text
+    # decodes to given bytes.
+    text = text.strip()
     try:
-        return base64.b64decode(text.strip(), validate=True)
+        raw = base64.b64decode(text, validate=True)
     except (binascii.Error, ValueError):
         raise Reject(2)
+    if base64.b64encode(raw).decode("ascii") != text:
+        raise Reject(2)
+    return raw
+
+
+def _no_repeats(pairs):
+    # A repeated key anywhere is refused, as JSON parsers disagree on which
+    # copy wins.
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError("repeated key " + key)
+        out[key] = value
+    return out
 
 
 def _int(value, lo, hi):
@@ -169,7 +186,7 @@ def _parse_path(p):
 
 def _parse_document(doc):
     try:
-        d = json.loads(doc)
+        d = json.loads(doc, object_pairs_hook=_no_repeats)
     except ValueError:
         raise Reject(4)
     if not isinstance(d, dict):
@@ -243,7 +260,7 @@ def accept(signed_json, public_key_b64, now_ms, current_issued_at_ms):
     """Returns 0 if the list is accepted, otherwise the rejection code."""
     try:
         try:
-            env = json.loads(signed_json)
+            env = json.loads(signed_json, object_pairs_hook=_no_repeats)
         except ValueError:
             raise Reject(1)
         if not (

@@ -1,6 +1,6 @@
 [package]
 name = "seylock"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.93"
 authors = ["Yurii Arkhanhelskyi"]
@@ -14,7 +14,7 @@ documentation = "https://docs.rs/seylock"
 homepage = "https://github.com/Arkhanhel/seylock"
 keywords = ["censorship", "circumvention", "proxy", "happy-eyeballs", "transport"]
 categories = ["network-programming", "cryptography", "web-programming::http-client"]
-exclude = ["target/", "*.signed.json", "fuzz/", "tor/"]
+exclude = ["target/", "*.signed.json", "fuzz/", "tor/", "bindings/", "Package.swift", ".build/", ".swiftpm/"]
 
 # Self-contained: in the Secretly monorepo this crate is built by cargokit
 # from inside a Flutter plugin, so it declares its own empty workspace and
@@ -44,8 +44,23 @@ tokio-socks = "0.5"
 tracing = "0.1"
 webpki-roots = "1"
 
+[features]
+# For the network lab only (examples/netem_lab.rs, tools/netem_lab.sh): lets
+# the lab trust its own certificate authority. Never enable it in an
+# application: a root added at run time can impersonate any server.
+lab-roots = []
+
 [dev-dependencies]
 rand = "0.9"
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring"] }
+
+[[example]]
+name = "netem_lab"
+required-features = ["lab-roots"]
+
+[[test]]
+name = "lab_tls"
+required-features = ["lab-roots"]
 
 # The library's size shows up in every application package, so releases are
 # optimised for size rather than speed: `ring` does the cryptography and TLS,

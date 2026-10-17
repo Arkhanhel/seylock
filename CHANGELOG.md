@@ -1,7 +1,95 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 17 October 2026
 
+0.2.0 rather than 0.1.2: public structs gained fields since 0.1.1, which
+breaks Rust code that builds them field by field.
+
+### Breaking for Rust code
+
+- `Policy`, `PolicyInput`, `EndpointList` and `runtime::Status` are
+  `#[non_exhaustive]`, so later fields will not break callers again. Build
+  them with `Policy::new(list)`, `PolicyInput::new(list)`,
+  `EndpointList::v2(...)` or `EndpointList::v1(...)` and set the fields you
+  need.
+- `seylock_update` and `seylock_set_network` are `unsafe extern "C"`, like
+  the other functions that take pointers. Nothing changes for C callers.
+
+### Fixed
+
+- A path that accepts a request and then stays silent no longer holds the
+  application forever: the new `response_timeout_ms` (policy JSON and
+  `Policy`) answers `504` and records the path as failed, so the next request
+  tries another. Off by default, so long polling keeps working; it applies to
+  requests with a body of at most 64 KiB, as larger uploads may still be in
+  transit.
+- A `502` or `504` from a mirror, CDN name or proxy no longer makes that path
+  the current one; the response still reaches the client unchanged.
+- A client breaking off its own upload no longer marks the path as failed.
+- An outcome is no longer recorded against a network or list that changed
+  while the request was in flight.
+- Stopping the proxy, or dropping its handle, now closes every open
+  connection and tunnel, not only the listener.
+- The TLS client names the `ring` provider instead of relying on the
+  process default, which panicked when another dependency enabled a second
+  rustls provider.
+- A local client must send its request head within 30 seconds, and a failing
+  `accept` backs off instead of spinning.
+- IPv6 literal base URLs (`https://[2001:db8::1]`) work.
+- Any `Upgrade` protocol is tunnelled after a `101`, not only WebSocket.
+- Responses carry `Vary: x-transport-service` (and the format 1 name), so an
+  HTTP cache cannot answer one service with another's response.
+- `update` compares whole lists, not only `issued_at_ms`, before keeping the
+  path memory.
+- A failure dated in the future no longer demotes a path; memory passed in
+  with more than 32 networks is trimmed to the limit.
+- Installing a Tor connector and replacing the list's bridges can no longer
+  interleave so that the new connector misses the new bridges.
+- Repeated JSON keys are refused everywhere, the `services` and `targets`
+  maps included (code 4; code 1 in the envelope), and the Python verifier
+  now refuses them and non-canonical base64 as Rust does. Test vectors: 63.
+- `endpoints_tool keygen` creates the signing key readable by its owner only.
+- Release builds: no path of the build machine is left in the libraries
+  (it was, hundreds of times), Android libraries are explicitly aligned to
+  16 KB pages whatever the NDK, and the XCFramework zip is deterministic.
+  With the pinned toolchain (Rust 1.93.1) the zip and the Android libraries
+  are byte-identical from any directory. The module map sits in
+  `Headers/SeyLockFFI/`, so it cannot collide with another XCFramework's.
+
+### Added
+
+- Android: the AAR ships `seylock_network_security_config`, which allows
+  plain HTTP to the proxy on `127.0.0.1` and nowhere else. Without it a
+  current Android application refuses the first request ("Cleartext HTTP
+  traffic to 127.0.0.1 not permitted"). Found by building a minified
+  application against the release AAR; the device test now uses the shipped
+  configuration instead of allowing plain HTTP everywhere.
+- Install instructions: the AAR is a release asset until it is on Maven
+  Central. No App Transport Security exception is needed on Apple platforms.
+- Network lab on Linux (`tools/netem_lab.sh`, `examples/netem_lab.rs`): two
+  network namespaces, blocking by `iptables` (silent drop, reset on the TLS
+  server name), latency and loss by `tc netem`, real TCP and TLS 1.3. It
+  measures the first request one path at a time and racing, and counts the
+  connections the server receives, so the cost of racing on a slow open
+  network is measured, not estimated. Runs in CI on every push (short) and
+  on demand (100 runs per row).
+- Real TLS tested end to end (`tests/lab_tls.rs`): a trusted certificate is
+  accepted, one from another authority or for another name is refused, and
+  the volunteer `proxy` path carries TLS inside TLS.
+- `lab-roots` feature, off by default and never for applications: lets the
+  lab and the TLS tests trust their own test authority.
+- INTEGRATING.md: the operator's and the developer's steps, and the things
+  that are easy to get wrong.
+- Swift package: a prebuilt XCFramework (iOS, iOS simulator, macOS) built by
+  `tools/build_xcframework.sh`, and a Swift API with typed errors and a
+  `URLRequest` helper. Tests include a real request through the proxy.
+- Android library `io.github.arkhanhel:seylock`: libseylock.so for three ABIs
+  and a Kotlin API through JNA, with typed exceptions and URL and header
+  helpers. Tested on the JVM and on an Android 15 emulator with a real
+  request through the proxy.
+- `include/seylock.h`: the C ABI with its ownership rules and every return
+  code, checked against the library in CI (`tools/check_c_abi.sh`).
+  `tor/include/seylock_tor.h` for the two functions of `seylock-tor`.
 - The `tor` path works when a Tor client is installed: a new `tor` module
   with a `TorConnector` hook, which the separate `seylock-tor` crate
   implements with arti. The core gains no dependencies.
@@ -10,7 +98,7 @@
 - Connect timeout for `tor` is 60 s, enough for a cold Tor start.
 - Format 2 lists may carry Tor bridge lines (`tor_bridges`), checked for count,
   length and printable ASCII (new rejection code 11) and handed to the
-  installed Tor connector whenever the list changes. Test vectors: 55.
+  installed Tor connector whenever the list changes.
 - `tor::list_bridges()`, so a connector can include the list's bridges from
   its first bootstrap.
 

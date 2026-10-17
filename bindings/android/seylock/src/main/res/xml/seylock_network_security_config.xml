@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SPDX-License-Identifier: MPL-2.0
+  SPDX-FileCopyrightText: 2025-2026 Yurii Arkhanhelskyi
+
+  SeyLock listens on loopback over plain HTTP. Since Android 9 an app may not
+  send plain HTTP unless its network security configuration allows it. This
+  configuration allows it for 127.0.0.1 only; every other host keeps the
+  platform default (no plain HTTP). Use it with
+  android:networkSecurityConfig="@xml/seylock_network_security_config", or copy
+  the domain-config into your own configuration.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>

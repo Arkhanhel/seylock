@@ -1,0 +1,7 @@
+/.gradle/
+/local.properties
+/build/
+/seylock/build/
+/sample/build/
+# Built by tools/build_android_libs.sh.
+/seylock/src/main/jniLibs/

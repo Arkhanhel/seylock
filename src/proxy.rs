@@ -21,8 +21,9 @@
 //! TLS is exactly the path through a volunteer's proxy. Here all TLS is done in
 //! Rust.
 //!
-//! WebSocket: a request with `Upgrade: websocket` becomes, after a 101
-//! response, two raw streams copied in opposite directions.
+//! Upgrades (WebSocket and any other `Upgrade` protocol): after a 101
+//! response the connection becomes two raw streams copied in opposite
+//! directions.
 //!
 //! Paths race at the connection stage, in the manner of Happy Eyeballs
 //! (RFC 8305): the next path starts if the previous one has not connected
@@ -33,7 +34,10 @@
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -42,11 +46,11 @@ use bytes::Bytes;
 use http::header::{HOST, HeaderName, HeaderValue};
 use http::{Request, Response, StatusCode, Uri};
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
-use hyper::body::Incoming;
-use hyper_util::rt::TokioIo;
+use hyper::body::{Body, Frame, Incoming, SizeHint};
+use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, Notify, watch};
 use tokio::task::JoinSet;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::ClientConfig;
@@ -79,12 +83,26 @@ const CONNECT_TIMEOUT_EXPENSIVE: Duration = Duration::from_secs(12);
 /// Tor may still be bootstrapping: a cold start with an empty directory cache
 /// takes 10 to 20 seconds before the first circuit.
 const CONNECT_TIMEOUT_TOR: Duration = Duration::from_secs(60);
+/// How long a local client may take to send a request head. Without it any
+/// other application on the device could hold idle connections open without
+/// the token.
+const LOCAL_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
+/// Pause after a failed `accept`, doubling up to the maximum.
+const ACCEPT_BACKOFF_MIN: Duration = Duration::from_millis(50);
+const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
 
 /// Bounds applied to [`Race`] values, so a bad setting cannot turn the proxy
 /// into a connection flood or make it wait for minutes.
 const RACE_DELAY_MIN_MS: u64 = 10;
 const RACE_DELAY_MAX_MS: u64 = 5_000;
 const RACE_PARALLEL_MAX: usize = 8;
+/// Bounds applied to [`Policy::response_timeout_ms`].
+const RESPONSE_TIMEOUT_MIN_MS: u64 = 1_000;
+const RESPONSE_TIMEOUT_MAX_MS: u64 = 600_000;
+/// Requests with a larger body are not timed: the end of such a body may
+/// still sit in socket buffers on its way to the server, and on a slow link
+/// draining them can take longer than any sensible timeout.
+const RESPONSE_TIMEOUT_BODY_LIMIT: u64 = 64 * 1024;
 
 /// How paths race at the connection stage.
 ///
@@ -132,7 +150,11 @@ type OutBody = BoxBody<Bytes, hyper::Error>;
 
 /// State the client can change on the fly: the list, the memory, the
 /// prohibitions.
+///
+/// Build it with [`Policy::new`] and set the fields you need; new fields may
+/// be added in later versions.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Policy {
     /// The accepted endpoint list the proxy chooses paths from.
     pub list: EndpointList,
@@ -150,9 +172,40 @@ pub struct Policy {
     pub current: Option<usize>,
     /// How paths race at the connection stage.
     pub race: Race,
+    /// How long to wait for the response head once the whole request has
+    /// been sent, in milliseconds, clamped to 1 s..10 min. A path that
+    /// accepts the request and then stays silent is a common way of
+    /// blocking; when the time runs out the client gets `504` and the path is
+    /// recorded as failed, so the next request tries another. Applies to
+    /// requests with a body of at most 64 KiB, which covers API calls; larger
+    /// uploads wait as long as the client does. `None` never times out,
+    /// which suits long polling. The request is never retried either way.
+    pub response_timeout_ms: Option<u64>,
 }
 
 impl Policy {
+    /// A policy for `list` with no memory, an empty network id, `tor` and
+    /// `socks` paths not allowed, racing with the defaults and no response
+    /// timeout.
+    pub fn new(list: EndpointList) -> Policy {
+        Policy {
+            list,
+            memory: PathMemory::default(),
+            network_id: String::new(),
+            allow_tor: false,
+            allow_socks: false,
+            current: None,
+            race: Race::default(),
+            response_timeout_ms: None,
+        }
+    }
+
+    fn response_timeout(&self) -> Option<Duration> {
+        self.response_timeout_ms.map(|ms| {
+            Duration::from_millis(ms.clamp(RESPONSE_TIMEOUT_MIN_MS, RESPONSE_TIMEOUT_MAX_MS))
+        })
+    }
+
     fn allowed(&self, kind: PathKind) -> bool {
         match kind {
             PathKind::Tor => self.allow_tor,
@@ -187,6 +240,9 @@ pub struct Served {
 }
 
 /// Handle to a running local proxy. Dropping it stops the proxy.
+///
+/// Stopping closes the listener and every open connection, WebSocket tunnels
+/// included, so nothing keeps forwarding under an old policy.
 pub struct ProxyHandle {
     /// TCP port on `127.0.0.1` the proxy listens on.
     pub port: u16,
@@ -194,7 +250,8 @@ pub struct ProxyHandle {
     /// format 1 `x-secretly-proxy-token`).
     pub token: String,
     policy: Arc<Mutex<Policy>>,
-    shutdown: Option<oneshot::Sender<()>>,
+    generation: Arc<AtomicU64>,
+    shutdown: Option<watch::Sender<()>>,
 }
 
 impl ProxyHandle {
@@ -203,6 +260,9 @@ impl ProxyHandle {
     pub async fn update_policy(&self, f: impl FnOnce(&mut Policy)) {
         let mut p = self.policy.lock().await;
         f(&mut p);
+        // Requests already in flight belong to the old policy: their
+        // outcomes are not recorded against the new network or list.
+        self.generation.fetch_add(1, Ordering::SeqCst);
         // A new list may carry new Tor bridges.
         crate::tor::set_list_bridges(&p.list.tor_bridges);
     }
@@ -212,11 +272,11 @@ impl ProxyHandle {
         self.policy.lock().await.clone()
     }
 
-    /// Stops accepting connections. Repeated calls have no effect.
+    /// Stops the proxy: closes the listener and every open connection.
+    /// Repeated calls have no effect.
     pub fn stop(&mut self) {
-        if let Some(tx) = self.shutdown.take() {
-            let _ = tx.send(());
-        }
+        // Dropping the sender wakes every task watching it.
+        self.shutdown.take();
     }
 }
 
@@ -230,8 +290,29 @@ impl Drop for ProxyHandle {
 struct Shared {
     token: String,
     policy: Arc<Mutex<Policy>>,
+    /// Bumped on every policy change.
+    generation: Arc<AtomicU64>,
     tls: TlsConnector,
     now_ms: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Closes when the proxy stops.
+    shutdown: watch::Receiver<()>,
+}
+
+impl Shared {
+    /// Records the outcome of a path, unless the policy changed since the
+    /// request started: then the network or the list may differ, and the
+    /// index or the network id would be wrong.
+    async fn note(&self, generation: u64, idx: usize, ok: bool, now_ms: i64) {
+        let mut policy = self.policy.lock().await;
+        if self.generation.load(Ordering::SeqCst) == generation {
+            policy.note(idx, ok, now_ms);
+        }
+    }
+}
+
+/// Resolves when the proxy stops.
+async fn stopped(mut shutdown: watch::Receiver<()>) {
+    while shutdown.changed().await.is_ok() {}
 }
 
 fn now_ms_system() -> i64 {
@@ -257,34 +338,62 @@ pub async fn start_with_clock(
     let token = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 24]>());
     crate::tor::set_list_bridges(&policy.list.tor_bridges);
     let policy = Arc::new(Mutex::new(policy));
+    let generation = Arc::new(AtomicU64::new(0));
+    let (tx, rx) = watch::channel(());
     let shared = Shared {
         token: token.clone(),
         policy: policy.clone(),
+        generation: generation.clone(),
         tls: tls_connector(),
         now_ms,
+        shutdown: rx.clone(),
     };
-    let (tx, mut rx) = oneshot::channel::<()>();
     tokio::spawn(async move {
+        let stop = stopped(rx);
+        tokio::pin!(stop);
+        let mut backoff = ACCEPT_BACKOFF_MIN;
         loop {
             tokio::select! {
-                _ = &mut rx => break,
+                _ = &mut stop => break,
                 accepted = listener.accept() => {
-                    let Ok((stream, peer)) = accepted else { continue };
+                    let (stream, peer) = match accepted {
+                        Ok(pair) => {
+                            backoff = ACCEPT_BACKOFF_MIN;
+                            pair
+                        }
+                        Err(e) => {
+                            // Out of file descriptors, or the socket taken
+                            // away while the app was suspended: wait instead
+                            // of spinning, and keep the proxy alive.
+                            tracing::warn!(target: "seylock", "accept: {e}");
+                            tokio::time::sleep(backoff).await;
+                            backoff = (backoff * 2).min(ACCEPT_BACKOFF_MAX);
+                            continue;
+                        }
+                    };
                     if !peer.ip().is_loopback() {
                         continue;
                     }
                     let shared = shared.clone();
                     tokio::spawn(async move {
+                        let shutdown = shared.shutdown.clone();
                         let io = TokioIo::new(stream);
                         let service = hyper::service::service_fn(move |req| {
                             let shared = shared.clone();
                             async move { Ok::<_, hyper::Error>(handle(shared, req).await) }
                         });
-                        let conn = hyper::server::conn::http1::Builder::new()
-                            .serve_connection(io, service)
-                            .with_upgrades();
-                        if let Err(e) = conn.await {
-                            tracing::debug!(target: "seylock", "client conn: {e}");
+                        let mut builder = hyper::server::conn::http1::Builder::new();
+                        builder
+                            .timer(TokioTimer::new())
+                            .header_read_timeout(LOCAL_HEADER_TIMEOUT);
+                        let conn = builder.serve_connection(io, service).with_upgrades();
+                        tokio::select! {
+                            result = conn => {
+                                if let Err(e) = result {
+                                    tracing::debug!(target: "seylock", "client conn: {e}");
+                                }
+                            }
+                            _ = stopped(shutdown) => {}
                         }
                     });
                 }
@@ -295,6 +404,7 @@ pub async fn start_with_clock(
         port,
         token,
         policy,
+        generation,
         shutdown: Some(tx),
     })
 }
@@ -302,9 +412,20 @@ pub async fn start_with_clock(
 fn tls_connector() -> TlsConnector {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    #[cfg(feature = "lab-roots")]
+    for root in crate::lab::roots() {
+        tracing::warn!(target: "seylock", "trusting a lab root certificate (lab-roots feature)");
+        let _ = roots.add(root);
+    }
+    // The provider is named, not taken from the process default: an
+    // application whose other dependencies enable another rustls provider
+    // would otherwise make this call panic.
+    let config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("ring supports the default protocol versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
     TlsConnector::from(Arc::new(config))
 }
 
@@ -356,7 +477,10 @@ async fn handle(shared: Shared, mut req: Request<Incoming>) -> Response<OutBody>
         _ => return reply(StatusCode::BAD_REQUEST, "service"),
     };
 
-    let policy = shared.policy.lock().await.clone();
+    let (policy, generation) = {
+        let policy = shared.policy.lock().await;
+        (policy.clone(), shared.generation.load(Ordering::SeqCst))
+    };
     if policy.list.service_base(&service).is_none() {
         return reply(StatusCode::BAD_REQUEST, "unknown service");
     }
@@ -382,7 +506,7 @@ async fn handle(shared: Shared, mut req: Request<Incoming>) -> Response<OutBody>
             })
         })
         .collect();
-    match race_connect(&shared, candidates, policy.race, now).await {
+    match race_connect(&shared, candidates, policy.race, generation, now).await {
         Ok((winner, stream)) => {
             let served = Served {
                 path_index: winner.idx,
@@ -392,9 +516,17 @@ async fn handle(shared: Shared, mut req: Request<Incoming>) -> Response<OutBody>
             // actually succeeded. Counting the connection alone let a mirror
             // that drops every request right after TLS stay current forever,
             // and the proxy never moved on.
-            let (response, outcome) = forward(req, stream, &winner.target, served).await;
+            let (response, outcome) = forward(
+                req,
+                stream,
+                &winner.target,
+                served,
+                policy.response_timeout(),
+                shared.shutdown.clone(),
+            )
+            .await;
             if let Some(ok) = outcome {
-                shared.policy.lock().await.note(winner.idx, ok, now);
+                shared.note(generation, winner.idx, ok, now).await;
             }
             response
         }
@@ -422,6 +554,7 @@ async fn race_connect(
     shared: &Shared,
     mut queue: VecDeque<Candidate>,
     race: Race,
+    generation: u64,
     now_ms: i64,
 ) -> Result<(Candidate, Upstream_), String> {
     let delay = race.delay();
@@ -455,7 +588,7 @@ async fn race_connect(
                 }
                 Some(Ok((candidate, Err(e)))) => {
                     last_err = format!("{}: {e}", candidate.spec.kind().as_str());
-                    shared.policy.lock().await.note(candidate.idx, false, now_ms);
+                    shared.note(generation, candidate.idx, false, now_ms).await;
                     // The slot is free: the next path starts at once.
                     next_start = tokio::time::Instant::now();
                 }
@@ -521,7 +654,12 @@ impl Target {
             Some("http") => false,
             _ => return None,
         };
-        let host = uri.host()?.to_string();
+        // An IPv6 literal comes bracketed; TLS and TCP want it bare.
+        let host = uri
+            .host()?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string();
         let port = uri.port_u16().unwrap_or(if tls { 443 } else { 80 });
         let path_prefix = uri.path().trim_end_matches('/').to_string();
         Some(Target {
@@ -536,9 +674,19 @@ impl Target {
     fn addr(&self) -> String {
         format!(
             "{}:{}",
-            self.connect_ip.as_deref().unwrap_or(&self.host),
+            bracket_v6(self.connect_ip.as_deref().unwrap_or(&self.host)),
             self.port
         )
+    }
+}
+
+/// `[2001:db8::1]` for an IPv6 literal, anything else unchanged: the form
+/// `host:port` strings and the `Host` header need.
+fn bracket_v6(host: &str) -> std::borrow::Cow<'_, str> {
+    if host.contains(':') {
+        format!("[{host}]").into()
+    } else {
+        host.into()
     }
 }
 
@@ -616,15 +764,29 @@ where
 }
 
 async fn forward(
-    mut req: Request<Incoming>,
+    req: Request<Incoming>,
     stream: Upstream_,
     target: &Target,
     served: Served,
+    response_timeout: Option<Duration>,
+    shutdown: watch::Receiver<()>,
 ) -> (Response<OutBody>, Option<bool>) {
     // Re-address the request to the target: the path gets the mirror's
     // prefix and `Host` becomes the target's name. Request signatures that
     // applications add must not cover the host for this to be safe; the
     // Secretly protocol's do not.
+    let (parts, body) = req.into_parts();
+    let body_state = Arc::new(BodyState::default());
+    if body.is_end_stream() {
+        body_state.finish(BODY_COMPLETE);
+    }
+    let mut req = Request::from_parts(
+        parts,
+        WatchedBody {
+            inner: body,
+            state: body_state.clone(),
+        },
+    );
     let path_and_query = req
         .uri()
         .path_and_query()
@@ -636,9 +798,9 @@ async fn forward(
         Err(_) => return (reply(StatusCode::BAD_REQUEST, "uri"), None),
     };
     let host_value = if (target.tls && target.port == 443) || (!target.tls && target.port == 80) {
-        target.host.clone()
+        bracket_v6(&target.host).into_owned()
     } else {
-        format!("{}:{}", target.host, target.port)
+        format!("{}:{}", bracket_v6(&target.host), target.port)
     };
     match HeaderValue::from_str(&host_value) {
         Ok(v) => {
@@ -647,11 +809,9 @@ async fn forward(
         Err(_) => return (reply(StatusCode::BAD_REQUEST, "host"), None),
     }
 
-    let is_upgrade = req
-        .headers()
-        .get(http::header::UPGRADE)
-        .map(|v| v.to_str().unwrap_or("").eq_ignore_ascii_case("websocket"))
-        .unwrap_or(false);
+    // Any protocol upgrade, WebSocket or another, is tunnelled after a 101;
+    // otherwise the client would get a 101 and then nothing.
+    let is_upgrade = req.headers().contains_key(http::header::UPGRADE);
 
     let (mut sender, conn) = match hyper::client::conn::http1::handshake(TokioIo::new(stream)).await
     {
@@ -679,13 +839,45 @@ async fn forward(
         None
     };
 
-    let mut response = match sender.send_request(req).await {
+    let sent = sender.send_request(req);
+    let result = match response_timeout {
+        None => sent.await.map_err(Some),
+        Some(limit) => {
+            // The clock starts once the whole request has been sent, so a
+            // long upload is never cut short; only silence afterwards counts.
+            let state = body_state.clone();
+            let silence = async move {
+                state.done.notified().await;
+                if state.status.load(Ordering::SeqCst) != BODY_COMPLETE
+                    || state.sent.load(Ordering::SeqCst) > RESPONSE_TIMEOUT_BODY_LIMIT
+                {
+                    std::future::pending::<()>().await;
+                }
+                tokio::time::sleep(limit).await;
+            };
+            tokio::select! {
+                r = sent => r.map_err(Some),
+                _ = silence => Err(None),
+            }
+        }
+    };
+    let mut response = match result {
         Ok(r) => r,
-        Err(e) => {
+        Err(None) => {
+            tracing::debug!(target: "seylock", "no response within {response_timeout:?}");
+            return (
+                reply(StatusCode::GATEWAY_TIMEOUT, "no response"),
+                Some(false),
+            );
+        }
+        Err(Some(e)) => {
             tracing::debug!(target: "seylock", "upstream request: {e}");
+            // When the client broke off its own upload, the path did nothing
+            // wrong and nothing is recorded.
+            let client_broke_off = body_state.status.load(Ordering::SeqCst) == BODY_CLIENT_ERROR;
             return (
                 reply(StatusCode::BAD_GATEWAY, "upstream request"),
-                Some(false),
+                (!client_broke_off).then_some(false),
             );
         }
     };
@@ -693,6 +885,14 @@ async fn forward(
         let headers = response.headers_mut();
         headers.insert(HeaderName::from_static(HEADER_TRANSPORT_PATH), v.clone());
         headers.insert(HeaderName::from_static(HEADER_PATH), v);
+    }
+    // Every service is reached at the same local URL; this keeps an HTTP
+    // cache from answering a request for one service with another's
+    // response.
+    for name in [HEADER_SERVICE, HEADER_UPSTREAM] {
+        response
+            .headers_mut()
+            .append(http::header::VARY, HeaderValue::from_static(name));
     }
 
     if response.status() == StatusCode::SWITCHING_PROTOCOLS {
@@ -705,7 +905,10 @@ async fn forward(
                 };
                 let mut client = TokioIo::new(client);
                 let mut upstream = TokioIo::new(upstream);
-                let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                tokio::select! {
+                    _ = tokio::io::copy_bidirectional(&mut client, &mut upstream) => {}
+                    _ = stopped(shutdown) => {}
+                }
             });
         }
         let (parts, _) = response.into_parts();
@@ -715,8 +918,85 @@ async fn forward(
         );
     }
 
+    // A gateway error means a mirror, CDN name or proxy answered but could
+    // not reach the server: the response goes to the client as it is, and the
+    // path is not taken as working, so the next request tries another. Any
+    // other status, errors included, comes from the server itself.
+    let path_worked = !matches!(
+        response.status(),
+        StatusCode::BAD_GATEWAY | StatusCode::GATEWAY_TIMEOUT
+    );
     let (parts, body) = response.into_parts();
-    (Response::from_parts(parts, body.boxed()), Some(true))
+    (Response::from_parts(parts, body.boxed()), Some(path_worked))
+}
+
+/// The request body from the local client, watched so the proxy knows when
+/// all of it has been sent and whether the client broke it off.
+struct WatchedBody {
+    inner: Incoming,
+    state: Arc<BodyState>,
+}
+
+const BODY_SENDING: u8 = 0;
+const BODY_COMPLETE: u8 = 1;
+const BODY_CLIENT_ERROR: u8 = 2;
+
+#[derive(Default)]
+struct BodyState {
+    status: AtomicU8,
+    /// Body bytes passed on so far.
+    sent: AtomicU64,
+    /// Signalled once, when the body completes or breaks off.
+    done: Notify,
+}
+
+impl BodyState {
+    fn finish(&self, status: u8) {
+        if self
+            .status
+            .compare_exchange(BODY_SENDING, status, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            // Stores a permit if nobody waits yet.
+            self.done.notify_one();
+        }
+    }
+}
+
+impl Body for WatchedBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, hyper::Error>>> {
+        let polled = Pin::new(&mut self.inner).poll_frame(cx);
+        if let Poll::Ready(Some(Ok(frame))) = &polled
+            && let Some(data) = frame.data_ref()
+        {
+            self.state
+                .sent
+                .fetch_add(data.len() as u64, Ordering::SeqCst);
+        }
+        match &polled {
+            Poll::Ready(None) => self.state.finish(BODY_COMPLETE),
+            Poll::Ready(Some(Err(_))) => self.state.finish(BODY_CLIENT_ERROR),
+            Poll::Ready(Some(Ok(_))) if self.inner.is_end_stream() => {
+                self.state.finish(BODY_COMPLETE)
+            }
+            _ => {}
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
 }
 
 #[cfg(test)]
@@ -814,6 +1094,7 @@ mod tests {
             allow_socks: false,
             current: None,
             race: Race::default(),
+            response_timeout_ms: None,
         }
     }
 
@@ -949,32 +1230,42 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
+    /// WebSocket and any other `Upgrade` protocol are tunnelled after a 101,
+    /// and stopping the proxy closes the tunnel.
     #[tokio::test]
-    async fn websocket_upgrade_is_tunnelled() {
-        let (port, _) = upstream_server().await;
-        let proxy = start(policy(vec![mirror(port)])).await.unwrap();
-        let mut stream = TcpStream::connect(("127.0.0.1", proxy.port)).await.unwrap();
-        let req = format!(
-            "GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\n{HEADER_TOKEN}: {}\r\n{HEADER_UPSTREAM}: relay\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
-            proxy.token
-        );
-        stream.write_all(req.as_bytes()).await.unwrap();
-        let mut buf = vec![0u8; 1024];
-        let n = stream.read(&mut buf).await.unwrap();
-        let head = String::from_utf8_lossy(&buf[..n]).to_string();
-        assert!(head.starts_with("HTTP/1.1 101"), "{head}");
-        assert!(
-            head.to_lowercase()
-                .contains(&format!("{HEADER_PATH}: mirror")),
-            "{head}"
-        );
-        stream.write_all(b"ping-through").await.unwrap();
-        let mut echo = [0u8; 12];
-        tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut echo))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(&echo, b"ping-through");
+    async fn upgrades_are_tunnelled_and_closed_on_stop() {
+        for protocol in ["websocket", "h2c"] {
+            let (port, _) = upstream_server().await;
+            let mut proxy = start(policy(vec![mirror(port)])).await.unwrap();
+            let mut stream = TcpStream::connect(("127.0.0.1", proxy.port)).await.unwrap();
+            let req = format!(
+                "GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\n{HEADER_TOKEN}: {}\r\n{HEADER_UPSTREAM}: relay\r\nConnection: Upgrade\r\nUpgrade: {protocol}\r\n\r\n",
+                proxy.token
+            );
+            stream.write_all(req.as_bytes()).await.unwrap();
+            let mut buf = vec![0u8; 1024];
+            let n = stream.read(&mut buf).await.unwrap();
+            let head = String::from_utf8_lossy(&buf[..n]).to_string();
+            assert!(head.starts_with("HTTP/1.1 101"), "{protocol}: {head}");
+            assert!(
+                head.to_lowercase()
+                    .contains(&format!("{HEADER_PATH}: mirror")),
+                "{head}"
+            );
+            stream.write_all(b"ping-through").await.unwrap();
+            let mut echo = [0u8; 12];
+            tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut echo))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(&echo, b"ping-through", "{protocol}");
+
+            proxy.stop();
+            let closed = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
+                .await
+                .expect("the tunnel closes when the proxy stops");
+            assert!(matches!(closed, Ok(0) | Err(_)), "{protocol}: {closed:?}");
+        }
     }
 
     fn v2_policy(paths: Vec<PathSpec>) -> Policy {
@@ -1323,5 +1614,298 @@ mod tests {
         proxy.stop();
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(TcpStream::connect(("127.0.0.1", p)).await.is_err());
+    }
+
+    /// A server on loopback that hands every connection to `behaviour`.
+    async fn raw_server<F, Fut>(behaviour: F) -> u16
+    where
+        F: Fn(TcpStream) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let behaviour = Arc::new(behaviour);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(behaviour(stream));
+            }
+        });
+        port
+    }
+
+    /// Reads whatever arrives first, answers with `reply` (if any), then
+    /// keeps the connection open without a word.
+    async fn answer(mut stream: TcpStream, reply: Option<&'static [u8]>, delay: Duration) {
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf).await;
+        tokio::time::sleep(delay).await;
+        if let Some(reply) = reply {
+            let _ = stream.write_all(reply).await;
+        }
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    }
+
+    const OK_REPLY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+
+    #[tokio::test]
+    async fn a_path_that_accepts_and_stays_silent_is_abandoned_after_the_response_timeout() {
+        let (port, _) = upstream_server().await;
+        let silent = raw_server(|s| answer(s, None, Duration::ZERO)).await;
+        let mut p = policy(vec![mirror(silent), mirror(port)]);
+        p.response_timeout_ms = Some(1_000);
+        let proxy = start(p).await.unwrap();
+        let started = std::time::Instant::now();
+        let (status, _, _) = get(&proxy, &proxy.token, "keys", "/a").await;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(proxy.policy().await.current, None);
+        let (status, _, body) = get(&proxy, &proxy.token, "keys", "/b").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("path=/k/b"), "{body}");
+        assert_eq!(proxy.policy().await.current, Some(1));
+    }
+
+    #[tokio::test]
+    async fn a_small_request_body_is_timed_too() {
+        let silent = raw_server(|s| answer(s, None, Duration::ZERO)).await;
+        let mut p = policy(vec![mirror(silent)]);
+        p.response_timeout_ms = Some(1_000);
+        let proxy = start(p).await.unwrap();
+        let stream = TcpStream::connect(("127.0.0.1", proxy.port)).await.unwrap();
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .unwrap();
+        tokio::spawn(conn);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/send")
+            .header(HOST, "127.0.0.1")
+            .header(HEADER_TOKEN, proxy.token.as_str())
+            .header(HEADER_UPSTREAM, "keys")
+            .body(Full::new(Bytes::from_static(b"{\"message\":1}")))
+            .unwrap();
+        let res = tokio::time::timeout(Duration::from_secs(5), sender.send_request(req))
+            .await
+            .expect("the proxy answers within the timeout")
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn a_large_upload_is_not_cut_short_by_the_response_timeout() {
+        // The server reads slowly: the upload takes longer than the timeout,
+        // and the answer comes once all of it has arrived.
+        let slow_reader = raw_server(|mut s| async move {
+            let mut total = 0;
+            let mut buf = [0u8; 16 * 1024];
+            while total < 2_000_000 {
+                match s.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => total += n,
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let _ = s.write_all(OK_REPLY).await;
+        })
+        .await;
+        let mut p = policy(vec![mirror(slow_reader)]);
+        p.response_timeout_ms = Some(1_000);
+        let proxy = start(p).await.unwrap();
+        let stream = TcpStream::connect(("127.0.0.1", proxy.port)).await.unwrap();
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .unwrap();
+        tokio::spawn(conn);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/upload")
+            .header(HOST, "127.0.0.1")
+            .header(HEADER_TOKEN, proxy.token.as_str())
+            .header(HEADER_UPSTREAM, "keys")
+            .body(Full::new(Bytes::from(vec![b'x'; 2_000_000])))
+            .unwrap();
+        let started = std::time::Instant::now();
+        let res = sender.send_request(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(
+            started.elapsed() > Duration::from_millis(1_000),
+            "the upload was slow"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gateway_error_does_not_make_a_path_current() {
+        let (port, _) = upstream_server().await;
+        let gateway = raw_server(|s| {
+            answer(
+                s,
+                Some(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+                Duration::ZERO,
+            )
+        })
+        .await;
+        let proxy = start(policy(vec![mirror(gateway), mirror(port)]))
+            .await
+            .unwrap();
+        let (status, via, _) = get(&proxy, &proxy.token, "keys", "/a").await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "passed on as it is");
+        assert_eq!(via.as_deref(), Some("mirror"));
+        assert_eq!(proxy.policy().await.current, None);
+        let (status, _, body) = get(&proxy, &proxy.token, "keys", "/b").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("path=/k/b"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_server_error_still_counts_as_a_working_path() {
+        let unavailable = raw_server(|s| {
+            answer(
+                s,
+                Some(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+                Duration::ZERO,
+            )
+        })
+        .await;
+        let proxy = start(policy(vec![mirror(unavailable)])).await.unwrap();
+        let (status, _, _) = get(&proxy, &proxy.token, "keys", "/a").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(proxy.policy().await.current, Some(0));
+    }
+
+    #[tokio::test]
+    async fn a_client_breaking_off_its_upload_does_not_fail_the_path() {
+        // Reads everything and never answers.
+        let sink = raw_server(|mut s| async move {
+            let mut buf = [0u8; 4096];
+            while matches!(s.read(&mut buf).await, Ok(n) if n > 0) {}
+        })
+        .await;
+        let proxy = start(policy(vec![mirror(sink)])).await.unwrap();
+        let mut client = TcpStream::connect(("127.0.0.1", proxy.port)).await.unwrap();
+        let head = format!(
+            "POST /up HTTP/1.1\r\nHost: 127.0.0.1\r\n{HEADER_TOKEN}: {}\r\n{HEADER_UPSTREAM}: keys\r\nContent-Length: 100000\r\n\r\n",
+            proxy.token
+        );
+        client.write_all(head.as_bytes()).await.unwrap();
+        client.write_all(&[b'x'; 1_000]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(client);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let memory = proxy.policy().await.memory;
+        assert!(
+            memory
+                .networks
+                .get("test")
+                .is_none_or(|m| m.failed_at_ms.is_empty()),
+            "{memory:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_outcome_is_not_recorded_after_the_policy_changed() {
+        let slow = raw_server(|s| answer(s, Some(OK_REPLY), Duration::from_millis(400))).await;
+        let proxy = Arc::new(start(policy(vec![mirror(slow)])).await.unwrap());
+        let request = {
+            let proxy = proxy.clone();
+            tokio::spawn(async move { get(&proxy, &proxy.token, "keys", "/a").await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        proxy.update_policy(|p| p.network_id = "cell".into()).await;
+        assert_eq!(request.await.unwrap().0, StatusCode::OK);
+        let p = proxy.policy().await;
+        assert_eq!(p.current, None, "the success belongs to the old network");
+        assert!(p.memory.networks.is_empty(), "{:?}", p.memory);
+    }
+
+    #[tokio::test]
+    async fn stopping_closes_open_connections() {
+        let (port, _) = upstream_server().await;
+        let mut proxy = start(policy(vec![mirror(port)])).await.unwrap();
+        let stream = TcpStream::connect(("127.0.0.1", proxy.port)).await.unwrap();
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .unwrap();
+        tokio::spawn(conn);
+        let request = |path: &str| {
+            Request::builder()
+                .uri(path)
+                .header(HOST, "127.0.0.1")
+                .header(HEADER_TOKEN, proxy.token.as_str())
+                .header(HEADER_UPSTREAM, "keys")
+                .body(Empty::<Bytes>::new())
+                .unwrap()
+        };
+        let first = sender.send_request(request("/a")).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let _ = first.into_body().collect().await;
+        let second = request("/b");
+        proxy.stop();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            sender.send_request(second).await.is_err(),
+            "a kept-alive connection must not outlive the proxy"
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_vary_on_the_service() {
+        let (port, _) = upstream_server().await;
+        let proxy = start(policy(vec![mirror(port)])).await.unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", proxy.port)).await.unwrap();
+        let req = format!(
+            "GET /a HTTP/1.1\r\nHost: 127.0.0.1\r\n{HEADER_TRANSPORT_TOKEN}: {}\r\n{HEADER_SERVICE}: keys\r\nConnection: close\r\n\r\n",
+            proxy.token
+        );
+        stream.write_all(req.as_bytes()).await.unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        let response = response.to_lowercase();
+        assert!(
+            response.contains(&format!("vary: {HEADER_SERVICE}")),
+            "{response}"
+        );
+        assert!(
+            response.contains(&format!("vary: {HEADER_UPSTREAM}")),
+            "{response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ipv6_literal_base_urls_work() {
+        let Ok(listener) = TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0)).await else {
+            return; // No IPv6 loopback on this machine.
+        };
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+                    let host = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("host: "))
+                        .unwrap_or("")
+                        .to_string();
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{host}",
+                        host.len()
+                    );
+                    let _ = s.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        let v6 = PathSpec::Mirror {
+            keys: Some(format!("http://[::1]:{port}/k")),
+            relay: Some(format!("http://[::1]:{port}/r")),
+            targets: Default::default(),
+            ip: None,
+        };
+        let proxy = start(policy(vec![v6])).await.unwrap();
+        let (status, _, body) = get(&proxy, &proxy.token, "keys", "/a").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, format!("[::1]:{port}"));
     }
 }

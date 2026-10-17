@@ -5,12 +5,18 @@
 //! Rules: strings are NUL-terminated UTF-8; anything the library returns must
 //! be freed only with [`seylock_string_free`]; errors are reported
 //! as codes, not panics (a panic across the FFI boundary is undefined
-//! behaviour, so every function is wrapped in `catch_unwind`).
+//! behaviour, so every function that does real work is wrapped in
+//! `catch_unwind`; `seylock_version` and `seylock_string_free` cannot
+//! panic).
 //!
-//! Codes: 0 is success; 1-8 are endpoint-list errors
+//! Codes: 0 is success; 1-11 are endpoint-list errors
 //! ([`crate::endpoints::EndpointError::code`]); 101-103 are runtime errors
-//! ([`crate::runtime::RuntimeError::code`]); 100 is an internal error or an
-//! invalid pointer.
+//! ([`crate::runtime::RuntimeError::code`]); 104 is invalid policy JSON; 100
+//! is an internal error or an invalid pointer.
+//!
+//! The C declarations, with these rules spelled out, are in
+//! `include/seylock.h`; `tools/check_c_abi.sh` compiles a C program against
+//! that header and the static library to keep the two in step.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -24,12 +30,15 @@ pub const ERR_INTERNAL: i32 = 100;
 /// Code for JSON that cannot be parsed.
 pub const ERR_JSON: i32 = 104;
 
-fn cstr<'a>(ptr: *const c_char) -> Option<&'a str> {
+/// # Safety
+///
+/// `ptr` is null or a NUL-terminated string that stays alive and unchanged
+/// for `'a`.
+unsafe fn cstr<'a>(ptr: *const c_char) -> Option<&'a str> {
     if ptr.is_null() {
         return None;
     }
-    // SAFETY: the caller promises a NUL-terminated string that stays alive
-    // for the duration of the call.
+    // SAFETY: guaranteed by the caller.
     unsafe { CStr::from_ptr(ptr) }.to_str().ok()
 }
 
@@ -65,7 +74,10 @@ pub unsafe extern "C" fn seylock_endpoints_verify(
     out_doc: *mut *mut c_char,
 ) -> i32 {
     guarded(|| {
-        let (Some(signed), Some(key)) = (cstr(signed_json), cstr(verifying_key_b64)) else {
+        // SAFETY: guaranteed by the caller of this function.
+        let (Some(signed), Some(key)) = (unsafe { cstr(signed_json) }, unsafe {
+            cstr(verifying_key_b64)
+        }) else {
             return ERR_INTERNAL;
         };
         match endpoints::verify_and_parse(signed, key, now_ms, current_issued_at_ms) {
@@ -96,7 +108,8 @@ pub unsafe extern "C" fn seylock_start(
     out_token: *mut *mut c_char,
 ) -> i32 {
     guarded(|| {
-        let Some(raw) = cstr(policy_json) else {
+        // SAFETY: guaranteed by the caller of this function.
+        let Some(raw) = (unsafe { cstr(policy_json) }) else {
             return ERR_INTERNAL;
         };
         if out_port.is_null() || out_token.is_null() {
@@ -121,10 +134,15 @@ pub unsafe extern "C" fn seylock_start(
 }
 
 /// Replaces the list, network and permissions of the running proxy.
+///
+/// # Safety
+///
+/// `policy_json` is null or a NUL-terminated string valid for the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn seylock_update(policy_json: *const c_char) -> i32 {
+pub unsafe extern "C" fn seylock_update(policy_json: *const c_char) -> i32 {
     guarded(|| {
-        let Some(raw) = cstr(policy_json) else {
+        // SAFETY: guaranteed by the caller.
+        let Some(raw) = (unsafe { cstr(policy_json) }) else {
             return ERR_INTERNAL;
         };
         let Ok(input) = serde_json::from_str::<PolicyInput>(raw) else {
@@ -138,10 +156,15 @@ pub extern "C" fn seylock_update(policy_json: *const c_char) -> i32 {
 
 /// Reports a network change (type + fingerprint, as the platform provides
 /// them).
+///
+/// # Safety
+///
+/// `network_id` is null or a NUL-terminated string valid for the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn seylock_set_network(network_id: *const c_char) -> i32 {
+pub unsafe extern "C" fn seylock_set_network(network_id: *const c_char) -> i32 {
     guarded(|| {
-        let Some(id) = cstr(network_id) else {
+        // SAFETY: guaranteed by the caller.
+        let Some(id) = (unsafe { cstr(network_id) }) else {
             return ERR_INTERNAL;
         };
         runtime::set_network(id)

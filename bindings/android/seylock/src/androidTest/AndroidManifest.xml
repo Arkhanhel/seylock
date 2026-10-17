@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The configuration the library ships, as an application uses it: plain
+         HTTP to the proxy on 127.0.0.1, and to nothing else. -->
+    <application android:networkSecurityConfig="@xml/seylock_network_security_config" />
+</manifest>

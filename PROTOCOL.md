@@ -81,6 +81,13 @@ the table below, a required field that is missing or has the wrong type, and a
 number outside its range (`v` is an unsigned 32-bit integer, times are signed
 64-bit, `port` is 0 to 65535) make the document invalid (code 4).
 
+A key repeated in any object, the envelope included, is refused: code 1 in
+the envelope, code 4 in the document. JSON parsers disagree on which copy of
+a repeated key wins, and a signed list must read the same in every
+implementation. Fields of the other format may be present when they are
+empty or `null` (`"services": {}` in format 1, `"logical": null` in format 2);
+with content they make the document invalid.
+
 `test-vectors/endpoints.json` holds signed lists with the result each must
 give, from acceptance to every rejection code. `tools/verify_vectors.py` is a
 second implementation of this section in plain Python, written from this
@@ -110,7 +117,10 @@ The signed envelope is:
 ```
 
 `sig_b64` is a standard base64 Ed25519 signature (64 bytes) over the
-signing context of the format followed by the UTF-8 bytes of `doc`:
+signing context of the format followed by the UTF-8 bytes of `doc`. Base64
+is strict, for the signature and the public key alike: with `=` padding and
+no stray bits in the last character, so only one text encodes given bytes
+(code 2 otherwise).
 
 ```
 format 1:  "secretly-endpoints-v1\n"  || doc
@@ -179,11 +189,29 @@ above. So a path that is working right now is not abandoned because the
 memory, which is only written to storage occasionally, still names another.
 
 `socks` and `tor` are allowed only when the app enables them. The memory
-keeps at most 32 networks and forgets the one with the oldest success.
+keeps at most 32 networks and forgets those with the oldest success, also
+when memory passed in at start holds more. A failure dated in the future (the
+clock was ahead and has been corrected) does not demote a path.
 
 A path counts as working only after a request through it got an HTTP
-response. A path that connects but then drops the request is recorded as
-failed, so the next request moves on.
+response from the server. It is recorded as failed, so the next request
+moves on, when:
+
+- it does not connect within its timeout;
+- it connects but then drops the request;
+- the response is `502` or `504`: a mirror, CDN name or proxy answered but
+  could not reach the server (the response still goes to the client as it
+  is; any other status, server errors included, comes from the server and
+  counts as working);
+- the policy sets `response_timeout_ms` and no response head arrives within
+  that time after a request with a body of at most 64 KiB has been sent. The
+  client then gets `504`. Larger uploads are not timed: their last bytes may
+  still be in transit, and on a slow link that can take longer than any
+  sensible timeout.
+
+Nothing is recorded when the client breaks off its own request, and nothing
+for a request that started before the list, the network or the permissions
+changed: its path index or network would be wrong.
 
 ### Racing
 
@@ -245,10 +273,20 @@ The request line keeps the original path and query. The proxy:
 - removes all four control headers, whichever spelling was used;
 - prepends the target's path prefix to the path;
 - sets `Host` to the target's host, with the port if it is not the default;
-- forwards the request over HTTP/1.1, and tunnels WebSocket upgrades in
-  both directions;
+- forwards the request over HTTP/1.1, and tunnels upgrades (WebSocket or
+  any other `Upgrade` protocol) in both directions after a `101`;
 - adds `x-transport-path: <kind>` and, for format 1 clients,
-  `x-secretly-path: <kind>` to the response, naming the path used.
+  `x-secretly-path: <kind>` to the response, naming the path used;
+- adds `Vary: x-transport-service` and `Vary: x-secretly-upstream`: every
+  service is reached at the same local URL, and this keeps an HTTP cache from
+  answering a request for one service with another's response. Cookies are
+  not separated this way; an application whose services set cookies should
+  keep one cookie store per service.
+
+A client must send the request head within 30 seconds; a connection that
+does not is closed, so no other program on the device can hold connections
+open without the token. Stopping the proxy closes the listener and every open
+connection, tunnels included.
 
 Proxy-generated errors:
 
@@ -256,8 +294,9 @@ Proxy-generated errors:
 |---|---|
 | 403 | Missing or wrong token. Nothing was sent anywhere. |
 | 400 | Missing service, a service the list does not name, or a request the proxy cannot rewrite. Nothing was sent anywhere. |
-| 503 | No path is allowed. |
-| 502 | Every path failed, or the chosen path dropped the request. |
+| 503 | No path is allowed by the policy. |
+| 502 | Every path failed, none of the allowed paths serves the service, or the chosen path dropped the request. |
+| 504 | `response_timeout_ms` passed with no response. |
 
 The app should trust a server `Date` header for clock correction only when
 `x-transport-path` is `direct` or `ip`, because other paths pass through
@@ -289,16 +328,18 @@ argument. Strings passed in are NUL-terminated UTF-8. Strings returned must be f
   "network_id": "wifi:3f2a...",
   "allow_tor": false,
   "allow_socks": false,
-  "race": { "delay_ms": 250, "max_parallel": 3 }
+  "race": { "delay_ms": 250, "max_parallel": 3 },
+  "response_timeout_ms": 20000
 }
 ```
 
 When `race` is absent, the proxy tries one path at a time, as version 0.1
 did, so an application written for 0.1 behaves exactly as before. `"race": {}`
-selects the defaults above.
+selects the defaults above. `response_timeout_ms` (clamped to 1 000–600 000)
+is absent by default, which never times out and suits long polling; see §2.
 
 `memory` is read only by `start`. `update` ignores it, and it clears the
-running memory by itself when the list's `issued_at_ms` changes: path indexes
+running memory by itself when the list changes in any way: path indexes
 refer to positions in the list, so a new list makes the old notes meaningless.
 
 Status JSON has `port`, `current` (path index or null), `current_kind`,

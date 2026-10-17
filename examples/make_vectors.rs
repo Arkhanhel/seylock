@@ -509,6 +509,94 @@ fn main() {
             )),
             10,
         ),
+        // Repeated keys: refused everywhere, so no two parsers can read one
+        // signed list differently.
+        case(
+            "repeated key in the document",
+            sign_v2(&k, &d2.replacen(r#""v":2"#, r#""v":2,"v":2"#, 1)),
+            4,
+        ),
+        case(
+            "repeated service name",
+            sign_v2(
+                &k,
+                &d2.replacen(
+                    r#""services":{"#,
+                    r#""services":{"api":"https://evil.example.org","#,
+                    1,
+                ),
+            ),
+            4,
+        ),
+        case(
+            "repeated service in a mirror's targets",
+            sign_v2(
+                &k,
+                &d2.replacen(
+                    r#""targets":{"#,
+                    r#""targets":{"api":"https://evil.example.org","#,
+                    1,
+                ),
+            ),
+            4,
+        ),
+        case(
+            "repeated key in the envelope",
+            {
+                let sig = k.sign(&signing_message_v2(d2.as_bytes())).to_bytes();
+                let doc = json!(d2).to_string();
+                format!(
+                    r#"{{"doc":{doc},"doc":{doc},"sig_b64":"{}"}}"#,
+                    B64.encode(sig)
+                )
+            },
+            1,
+        ),
+        // Base64 is strict: canonical padding and no stray bits.
+        case(
+            "signature in non-canonical base64",
+            {
+                let sig = k.sign(&signing_message_v2(d2.as_bytes())).to_bytes();
+                let mut text = B64.encode(sig);
+                // 64 bytes end in one character carrying two bits, then
+                // "==". Setting its unused low bits decodes to the same bytes
+                // in a lenient decoder.
+                let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                let at = text.len() - 3;
+                let index = alphabet
+                    .iter()
+                    .position(|c| *c == text.as_bytes()[at])
+                    .unwrap();
+                let lenient = alphabet[(index & 0b11_0000) | 0b00_0001] as char;
+                text.replace_range(at..at + 1, &lenient.to_string());
+                json!({ "doc": d2, "sig_b64": text }).to_string()
+            },
+            2,
+        ),
+        case(
+            "signature without padding",
+            {
+                let sig = k.sign(&signing_message_v2(d2.as_bytes())).to_bytes();
+                let text = B64.encode(sig);
+                json!({ "doc": d2, "sig_b64": text.trim_end_matches('=') }).to_string()
+            },
+            2,
+        ),
+        // Fields of the other format may be present when empty or null.
+        case(
+            "v1 with empty v2 fields accepted",
+            s1(with(
+                with(v1(ISSUED, EXPIRES), &["services"], json!({})),
+                &["tor_bridges"],
+                json!([]),
+            )),
+            0,
+        ),
+        case(
+            "v2 with null logical accepted",
+            s2(with(v2(ISSUED, EXPIRES), &["logical"], json!(null))),
+            0,
+        ),
     ];
     // The service-name cases rely on these lengths; check the arithmetic
     // rather than trust the literals.

@@ -28,6 +28,7 @@ use std::collections::BTreeMap;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 /// Signing context of format 1: the first bytes of the signed message. It
@@ -129,7 +130,11 @@ pub enum PathSpec {
         /// Format 2: base URL of the mirror for each service it serves, with
         /// the same rules as `keys`. A service missing here is not served by
         /// this mirror, and requests for it skip the path.
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        #[serde(
+            default,
+            skip_serializing_if = "BTreeMap::is_empty",
+            deserialize_with = "unique_keys"
+        )]
         targets: BTreeMap<String, String>,
         /// Optional IP address to connect to instead of resolving the mirror's
         /// host. The TLS name and `Host` stay the mirror's host.
@@ -148,7 +153,11 @@ pub enum PathSpec {
         relay: Option<String>,
         /// Format 2: base URL of the CDN-fronted name for each service, as for
         /// `mirror`.
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        #[serde(
+            default,
+            skip_serializing_if = "BTreeMap::is_empty",
+            deserialize_with = "unique_keys"
+        )]
         targets: BTreeMap<String, String>,
     },
     /// A TLS proxy in the Signal format: outer TLS to `host`, with TLS to the
@@ -245,8 +254,10 @@ pub enum PathKind {
     /// that host. Tried only when the application allows it. Connect timeout:
     /// 12 seconds.
     Socks,
-    /// Reserved for a built-in Tor client. Tried only when the application
-    /// allows it; in this version it always fails to connect.
+    /// Through Tor, by the connector a companion crate installs (see
+    /// [`crate::tor`]; `seylock-tor` provides one). Tried only when the
+    /// application allows it; without a connector it fails at once. Connect
+    /// timeout: 60 seconds, for a cold start.
     Tor,
 }
 
@@ -277,8 +288,43 @@ impl PathKind {
     }
 }
 
+/// Reads a map of strings, refusing a key that appears twice. Objects that
+/// map to structs already refuse repeated fields; maps would keep the last
+/// copy, and another parser might keep the first, so one signed list could be
+/// read two ways.
+fn unique_keys<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct UniqueKeys;
+    impl<'de> Visitor<'de> for UniqueKeys {
+        type Value = BTreeMap<String, String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a map of strings without repeated keys")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut out = BTreeMap::new();
+            while let Some((key, value)) = map.next_entry::<String, String>()? {
+                if out.contains_key(&key) {
+                    return Err(de::Error::custom(format!("repeated key `{key}`")));
+                }
+                out.insert(key, value);
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_map(UniqueKeys)
+}
+
 /// A parsed list.
+///
+/// Lists normally come from [`verify_and_parse`]. To build one in Rust (for
+/// signing, or in tests), start from [`EndpointList::v2`]; new fields may be
+/// added in later versions of the format.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct EndpointList {
     /// Format version: 1 or 2 ([`crate::ENDPOINT_LIST_VERSION`] is the
     /// newest). Any other value is rejected with code 5.
@@ -297,7 +343,11 @@ pub struct EndpointList {
     pub logical: Option<Logical>,
     /// Format 2: canonical base URL of each service, by name (see
     /// [`is_valid_service_name`]). At least one, at most [`MAX_SERVICES`].
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "unique_keys"
+    )]
     pub services: BTreeMap<String, String>,
     /// Ways to reach the servers, in any order; the probe order is set by
     /// [`crate::paths`]. A list with no paths is rejected.
@@ -312,6 +362,45 @@ pub struct EndpointList {
 }
 
 impl EndpointList {
+    /// A format 2 list of `services` (name to base URL) reachable by `paths`,
+    /// with no Tor bridges. It still has to pass the checks of
+    /// [`verify_and_parse`] once signed.
+    pub fn v2(
+        issued_at_ms: i64,
+        expires_at_ms: i64,
+        services: BTreeMap<String, String>,
+        paths: Vec<PathSpec>,
+    ) -> EndpointList {
+        EndpointList {
+            v: 2,
+            issued_at_ms,
+            expires_at_ms,
+            logical: None,
+            services,
+            paths,
+            tor_bridges: Vec::new(),
+        }
+    }
+
+    /// A format 1 list: the `keys` and `relay` servers of `logical`
+    /// reachable by `paths`.
+    pub fn v1(
+        issued_at_ms: i64,
+        expires_at_ms: i64,
+        logical: Logical,
+        paths: Vec<PathSpec>,
+    ) -> EndpointList {
+        EndpointList {
+            v: 1,
+            issued_at_ms,
+            expires_at_ms,
+            logical: Some(logical),
+            services: BTreeMap::new(),
+            paths,
+            tor_bridges: Vec::new(),
+        }
+    }
+
     /// Canonical base URL of `service`, or `None` when the list has no such
     /// service. Format 1 knows `keys` and `relay`.
     pub fn service_base(&self, service: &str) -> Option<&str> {

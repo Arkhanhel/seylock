@@ -41,7 +41,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use seylock::endpoints::{EndpointList, PathSpec};
-use seylock::paths::PathMemory;
 use seylock::proxy::{self, HEADER_SERVICE, HEADER_TRANSPORT_TOKEN, Policy, Race};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -152,15 +151,12 @@ struct Scenario {
 }
 
 fn list(api: String, paths: Vec<PathSpec>) -> EndpointList {
-    EndpointList {
-        v: 2,
-        issued_at_ms: 1,
-        expires_at_ms: i64::MAX / 2,
-        logical: None,
-        services: [("api".to_string(), api)].into_iter().collect(),
+    EndpointList::v2(
+        1,
+        i64::MAX / 2,
+        [("api".to_string(), api)].into_iter().collect(),
         paths,
-        tor_bridges: Vec::new(),
-    }
+    )
 }
 
 fn targets(base: String) -> std::collections::BTreeMap<String, String> {
@@ -170,14 +166,12 @@ fn targets(base: String) -> std::collections::BTreeMap<String, String> {
 /// Sends one request through a fresh proxy and returns how long it took, or
 /// `None` if it failed.
 async fn one_run(list: EndpointList, allow_socks: bool, race: Race) -> Option<Duration> {
-    let proxy = proxy::start(Policy {
-        list,
-        memory: PathMemory::default(),
-        network_id: "lab".into(),
-        allow_tor: false,
-        allow_socks,
-        current: None,
-        race,
+    let proxy = proxy::start({
+        let mut policy = Policy::new(list);
+        policy.network_id = "lab".into();
+        policy.allow_socks = allow_socks;
+        policy.race = race;
+        policy
     })
     .await
     .ok()?;

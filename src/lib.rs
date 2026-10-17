@@ -20,12 +20,16 @@
 //! - [`tor`]: the hook through which a separate crate supplies a Tor client
 //!   for the `tor` path;
 //! - [`ffi`]: a C ABI for non-Rust clients such as Dart/Flutter.
+//! - `lab`, only with the `lab-roots` feature: root certificates for the
+//!   network lab. Never enabled in applications.
 
 #![deny(missing_docs)]
 #![warn(rust_2018_idioms)]
 
 pub mod endpoints;
 pub mod ffi;
+#[cfg(feature = "lab-roots")]
+pub mod lab;
 pub mod paths;
 pub mod proxy;
 pub mod runtime;

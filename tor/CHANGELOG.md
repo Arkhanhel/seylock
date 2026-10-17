@@ -1,8 +1,10 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 — 17 October 2026
 
-First version.
+First version, for `seylock` 0.2.
+
+- `include/seylock_tor.h`: the C declarations of the two functions below.
 
 - `ArtiConnector`: a Tor client for SeyLock's `tor` path, built on arti 0.47.
   It bootstraps in the background and reports its progress to SeyLock's
@@ -21,5 +23,9 @@ First version.
   owner before start. Under a permissive umask they were writable by everyone,
   and arti then refused its own directory on the next start; this was found on
   an Android phone.
+- On Windows SQLite is always compiled in (there is no system SQLite).
+- The dependency audit ignores RUSTSEC-2023-0071 only, with the reason
+  documented (a Tor client makes no private-key RSA operations; see
+  tpo/core/arti#2447).
 - Example `tor_probe`: one request through SeyLock and Tor, for checking a
   device without an application. It accepts bridges and a running transport.

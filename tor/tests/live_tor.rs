@@ -27,10 +27,7 @@ use http::Request;
 use http_body_util::{BodyExt, Empty};
 use hyper_util::rt::TokioIo;
 use seylock::endpoints::{EndpointList, PathSpec};
-use seylock::paths::PathMemory;
-use seylock::proxy::{
-    self, HEADER_SERVICE, HEADER_TRANSPORT_PATH, HEADER_TRANSPORT_TOKEN, Policy, Race,
-};
+use seylock::proxy::{self, HEADER_SERVICE, HEADER_TRANSPORT_PATH, HEADER_TRANSPORT_TOKEN, Policy};
 use seylock_tor::{ArtiConnector, TorSettings};
 use tokio::net::TcpStream;
 
@@ -71,28 +68,22 @@ async fn a_request_goes_through_a_bridge_from_the_signed_list() {
 }
 
 fn site_list() -> EndpointList {
-    EndpointList {
-        v: 2,
-        issued_at_ms: 1,
-        expires_at_ms: i64::MAX / 2,
-        logical: None,
-        services: [("site".to_string(), "https://example.com".to_string())]
+    EndpointList::v2(
+        1,
+        i64::MAX / 2,
+        [("site".to_string(), "https://example.com".to_string())]
             .into_iter()
             .collect(),
-        paths: vec![PathSpec::Tor],
-        tor_bridges: Vec::new(),
-    }
+        vec![PathSpec::Tor],
+    )
 }
 
 fn policy(list: EndpointList) -> Policy {
-    Policy {
-        list,
-        memory: PathMemory::default(),
-        network_id: "live".into(),
-        allow_tor: true,
-        allow_socks: false,
-        current: None,
-        race: Race::default(),
+    {
+        let mut policy = Policy::new(list);
+        policy.network_id = "live".into();
+        policy.allow_tor = true;
+        policy
     }
 }
 
@@ -135,24 +126,18 @@ async fn a_request_goes_through_tor() {
         ArtiConnector::start_on(&settings, &tokio::runtime::Handle::current()).expect("tor setup");
     seylock::tor::install(connector);
 
-    let proxy = proxy::start(Policy {
-        list: EndpointList {
-            v: 2,
-            issued_at_ms: 1,
-            expires_at_ms: i64::MAX / 2,
-            logical: None,
-            services: [("site".to_string(), "https://example.com".to_string())]
+    let proxy = proxy::start({
+        let mut policy = Policy::new(EndpointList::v2(
+            1,
+            i64::MAX / 2,
+            [("site".to_string(), "https://example.com".to_string())]
                 .into_iter()
                 .collect(),
-            paths: vec![PathSpec::Tor],
-            tor_bridges: Vec::new(),
-        },
-        memory: PathMemory::default(),
-        network_id: "live".into(),
-        allow_tor: true,
-        allow_socks: false,
-        current: None,
-        race: Race::default(),
+            vec![PathSpec::Tor],
+        ));
+        policy.network_id = "live".into();
+        policy.allow_tor = true;
+        policy
     })
     .await
     .expect("proxy");

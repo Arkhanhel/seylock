@@ -9,15 +9,15 @@
 #
 #   tools/check_reproducible.sh
 #
-# Paths are remapped (--remap-path-prefix) so the build directory and the
-# Cargo home do not end up in the binaries. The toolchain is whatever
-# `cargo` resolves to; both builds use the same one.
+# Both builds use the settings of the release scripts (tools/release_env.sh):
+# the pinned toolchain and remapped paths, so neither the build directory nor
+# the Cargo home ends up in the binaries. The check also fails if any local
+# path is left in them.
 set -eu
 
 here=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-cargo_home=${CARGO_HOME:-$HOME/.cargo}
 
 for copy in one two; do
     mkdir -p "$work/$copy"
@@ -25,9 +25,13 @@ for copy in one two; do
     (cd "$here" && tar --exclude=./target --exclude=./fuzz -cf - .) | (cd "$work/$copy" && tar -xf -)
     (
         cd "$work/$copy"
-        RUSTFLAGS="--remap-path-prefix=$work/$copy=/build --remap-path-prefix=$cargo_home=/cargo" \
-            CARGO_TARGET_DIR="$work/$copy/target" \
-            cargo build --release --locked --lib --quiet
+        here="$work/$copy"
+        . tools/release_env.sh
+        CARGO_TARGET_DIR="$work/$copy/target" cargo build --release --locked --lib --quiet
+        for lib in target/release/libseylock.a target/release/libseylock.so \
+            target/release/libseylock.dylib; do
+            if [ -f "$lib" ]; then check_no_local_paths "$lib"; fi
+        done
     )
 done
 

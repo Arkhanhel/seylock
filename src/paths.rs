@@ -112,7 +112,10 @@ impl PathMemory {
                     .and_then(|m| m.failed_at_ms.get(&idx))
                     // Saturating: the time comes from storage the
                     // application keeps, which may be damaged.
-                    .map(|at| now_ms.saturating_sub(*at) < FAILURE_MEMORY_MS)
+                    // A failure dated in the future (the clock was ahead
+                    // and has been corrected) is not trusted: otherwise the
+                    // path would stay demoted until the clock caught up.
+                    .map(|at| (0..FAILURE_MEMORY_MS).contains(&now_ms.saturating_sub(*at)))
                     .unwrap_or(false);
                 if failed_recently {
                     recently_failed.push(idx);
@@ -125,17 +128,26 @@ impl PathMemory {
         out
     }
 
+    /// Makes room so that, with `keep` in it, the memory holds at most
+    /// [`MAX_NETWORKS`] networks, evicting those whose last success is the
+    /// oldest. A loop, not one eviction: memory passed in by the application
+    /// may already hold more than the limit.
     fn trim(&mut self, keep: &str) {
-        if self.networks.len() < MAX_NETWORKS || self.networks.contains_key(keep) {
-            return;
-        }
-        // Evict the network whose last success is the oldest.
-        if let Some(oldest) = self
-            .networks
-            .iter()
-            .min_by_key(|(_, m)| m.last_ok_at_ms)
-            .map(|(k, _)| k.clone())
-        {
+        let room = if self.networks.contains_key(keep) {
+            MAX_NETWORKS
+        } else {
+            MAX_NETWORKS - 1
+        };
+        while self.networks.len() > room {
+            let Some(oldest) = self
+                .networks
+                .iter()
+                .filter(|(k, _)| k.as_str() != keep)
+                .min_by_key(|(_, m)| m.last_ok_at_ms)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
             self.networks.remove(&oldest);
         }
     }
@@ -211,5 +223,29 @@ mod tests {
         let back = PathMemory::from_json(&m.to_json());
         assert_eq!(back, m);
         assert_eq!(PathMemory::from_json("garbage"), PathMemory::default());
+    }
+
+    #[test]
+    fn a_failure_dated_in_the_future_is_not_trusted() {
+        // The clock was a year ahead when the path failed, then corrected.
+        let mut m = PathMemory::default();
+        let year = 365 * 24 * 60 * 60 * 1000;
+        m.report("cell:x", 0, false, 1_000 + year);
+        assert_eq!(m.order("cell:x", &paths(), &all, 1_000), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn memory_passed_in_over_the_limit_is_trimmed_to_it() {
+        let mut m = PathMemory::default();
+        for n in 0..MAX_NETWORKS + 10 {
+            m.networks
+                .insert(format!("net:{n}"), NetworkMemory::default());
+        }
+        m.report("net:new", 0, true, 1_000);
+        assert_eq!(m.networks.len(), MAX_NETWORKS);
+        assert!(m.networks.contains_key("net:new"));
+        // Reporting on a network already present keeps it at the limit.
+        m.report("net:new", 1, true, 2_000);
+        assert_eq!(m.networks.len(), MAX_NETWORKS);
     }
 }

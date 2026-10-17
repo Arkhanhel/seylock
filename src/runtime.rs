@@ -37,7 +37,11 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 }
 
 /// What the application passes at start-up and on update.
+///
+/// From Rust, build it with [`PolicyInput::new`]; new fields may be added in
+/// later versions.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PolicyInput {
     /// The accepted endpoint list to use.
     pub list: EndpointList,
@@ -60,6 +64,28 @@ pub struct PolicyInput {
     /// exactly as before; pass `"race": {}` for the racing defaults.
     #[serde(default = "sequential_race")]
     pub race: Race,
+    /// How long to wait for the response head once the whole request has
+    /// been sent, in milliseconds (see [`Policy::response_timeout_ms`]).
+    /// Absent: no limit, as in version 0.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_timeout_ms: Option<u64>,
+}
+
+impl PolicyInput {
+    /// Input for `list` with no memory, an empty network id, `tor` and
+    /// `socks` not allowed, racing with the defaults (as `"race": {}` in
+    /// JSON) and no response timeout.
+    pub fn new(list: EndpointList) -> PolicyInput {
+        PolicyInput {
+            list,
+            memory: PathMemory::default(),
+            network_id: String::new(),
+            allow_tor: false,
+            allow_socks: false,
+            race: Race::default(),
+            response_timeout_ms: None,
+        }
+    }
 }
 
 fn sequential_race() -> Race {
@@ -68,21 +94,22 @@ fn sequential_race() -> Race {
 
 impl From<PolicyInput> for Policy {
     fn from(p: PolicyInput) -> Self {
-        Policy {
-            list: p.list,
-            memory: p.memory,
-            network_id: p.network_id,
-            allow_tor: p.allow_tor,
-            allow_socks: p.allow_socks,
-            current: None,
-            race: p.race,
-        }
+        let mut policy = Policy::new(p.list);
+        policy.memory = p.memory;
+        policy.network_id = p.network_id;
+        policy.allow_tor = p.allow_tor;
+        policy.allow_socks = p.allow_socks;
+        policy.race = p.race;
+        policy.response_timeout_ms = p.response_timeout_ms;
+        policy
     }
 }
 
 /// A state snapshot for the application: the port, the current path, and the
-/// memory the application keeps between runs.
+/// memory the application keeps between runs. New fields may be added in
+/// later versions.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Status {
     /// TCP port on `127.0.0.1` the proxy listens on.
     pub port: u16,
@@ -168,19 +195,22 @@ pub fn stop() -> bool {
 }
 
 /// Replaces the list, network and permissions of the running proxy. If the
-/// list's `issued_at_ms` differs from the current one, the path memory and
-/// current path are reset, because path indices refer to the old list. Fails
+/// list differs from the current one in any way, the path memory and current
+/// path are reset, because path indices refer to the old list. Fails
 /// with [`RuntimeError::NotStarted`] if no proxy is running.
 pub fn update(input: PolicyInput) -> Result<(), RuntimeError> {
     let slot = PROXY.lock().unwrap_or_else(|e| e.into_inner());
     let handle = slot.as_ref().ok_or(RuntimeError::NotStarted)?;
     runtime().block_on(handle.update_policy(|p| {
-        let same_list = p.list.issued_at_ms == input.list.issued_at_ms;
+        // Compared whole: two lists may share a timestamp (one list signed in
+        // both formats, say) and still number their paths differently.
+        let same_list = p.list == input.list;
         p.list = input.list;
         p.network_id = input.network_id;
         p.allow_tor = input.allow_tor;
         p.allow_socks = input.allow_socks;
         p.race = input.race;
+        p.response_timeout_ms = input.response_timeout_ms;
         if !same_list {
             // Path indices refer to the old list.
             p.memory = PathMemory::default();
@@ -250,6 +280,7 @@ mod tests {
             allow_tor: false,
             allow_socks: false,
             race: Race::SEQUENTIAL,
+            response_timeout_ms: None,
         }
     }
 
@@ -297,6 +328,17 @@ mod tests {
     }
 
     #[test]
+    fn response_timeout_is_off_unless_given() {
+        let json = r#"{"list":{"v":1,"issued_at_ms":1,"expires_at_ms":9,
+            "logical":{"keys":"https://k","relay":"https://r"},"paths":[{"kind":"direct"}]}}"#;
+        let p: PolicyInput = serde_json::from_str(json).unwrap();
+        assert_eq!(p.response_timeout_ms, None);
+        let timed = json.replacen('{', r#"{"response_timeout_ms":20000,"#, 1);
+        let p: PolicyInput = serde_json::from_str(&timed).unwrap();
+        assert_eq!(Policy::from(p).response_timeout_ms, Some(20_000));
+    }
+
+    #[test]
     fn start_update_status_stop_lifecycle() {
         // One proxy per process: the test holds global state, so it runs the
         // whole life cycle itself.
@@ -313,8 +355,23 @@ mod tests {
         assert_eq!(status().unwrap().network_id, "cell:x");
         let mut newer = input();
         newer.list.issued_at_ms = 6;
-        update(newer).unwrap();
+        update(newer.clone()).unwrap();
         assert_eq!(status().unwrap().issued_at_ms, 6);
+
+        // Memory survives an update with the same list, and is reset by a
+        // different list even when the timestamp is the same: its paths may
+        // be numbered differently.
+        {
+            let slot = PROXY.lock().unwrap();
+            let handle = slot.as_ref().unwrap();
+            runtime().block_on(handle.update_policy(|p| p.memory.report("cell:x", 0, true, 10)));
+        }
+        update(newer.clone()).unwrap();
+        assert!(!status().unwrap().memory.networks.is_empty());
+        let mut renumbered = newer;
+        renumbered.list.paths = vec![PathSpec::Tor, PathSpec::Direct];
+        update(renumbered).unwrap();
+        assert!(status().unwrap().memory.networks.is_empty());
         assert!(stop());
         assert_eq!(status().err(), Some(RuntimeError::NotStarted));
     }

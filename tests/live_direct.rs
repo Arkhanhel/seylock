@@ -21,8 +21,7 @@ use http::Request;
 use http_body_util::{BodyExt, Empty};
 use hyper_util::rt::TokioIo;
 use seylock::endpoints::{EndpointList, Logical, PathSpec};
-use seylock::paths::PathMemory;
-use seylock::proxy::{self, HEADER_PATH, HEADER_TOKEN, HEADER_UPSTREAM, Policy, Race};
+use seylock::proxy::{self, HEADER_PATH, HEADER_TOKEN, HEADER_UPSTREAM, Policy};
 use tokio::net::TcpStream;
 
 fn env(name: &str) -> Option<String> {
@@ -64,25 +63,18 @@ async fn health_via(policy: Policy, upstream: &str) -> (http::StatusCode, String
 }
 
 fn policy(paths: Vec<PathSpec>) -> Policy {
-    Policy {
-        list: EndpointList {
-            v: 1,
-            issued_at_ms: 1,
-            expires_at_ms: i64::MAX / 2,
-            logical: Some(Logical {
+    {
+        let mut policy = Policy::new(EndpointList::v1(
+            1,
+            i64::MAX / 2,
+            Logical {
                 keys: env("LIVE_KEYS_URL").unwrap_or_default(),
                 relay: env("LIVE_RELAY_URL").unwrap_or_default(),
-            }),
-            services: Default::default(),
+            },
             paths,
-            tor_bridges: Vec::new(),
-        },
-        memory: PathMemory::default(),
-        network_id: "live".into(),
-        allow_tor: false,
-        allow_socks: false,
-        current: None,
-        race: Race::default(),
+        ));
+        policy.network_id = "live".into();
+        policy
     }
 }
 

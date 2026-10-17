@@ -30,7 +30,8 @@ seylock::tor::install(seylock_tor::ArtiConnector::start(&settings)?);
 ```
 
 From other languages, link this crate's library instead of `seylock`'s: it
-carries SeyLock's whole C ABI plus two functions.
+carries SeyLock's whole C ABI plus two functions, declared in
+[`include/seylock_tor.h`](include/seylock_tor.h).
 
 | Function | Returns |
 |---|---|
@@ -112,16 +113,20 @@ bootstraps.
 
 ## Platforms
 
-- **Linux, Windows, macOS.** Build as is.
-- **Android.** Enable the `bundled-sqlite` feature: the NDK has no public
-  SQLite. The bundled copy stays private to the library and does not clash
-  with the application's own.
-- **macOS and iOS apps that use SQLCipher.** Do **not** enable
-  `bundled-sqlite`, and do not link the system `libsqlite3` either.
-  - Let arti use the application's SQLCipher, which provides the same
-    `sqlite3_*` functions.
-  - Two SQLite copies in one process can silently replace the encrypted
-    database engine with the plain one.
+arti keeps its directory cache in SQLite. Whether to compile SQLite into the
+library depends on how the library is linked:
+
+- **Dynamic library** (`.so`, `.dll`, `.dylib`): use `bundled-sqlite`. The
+  copy stays private, because the library exports only its own functions,
+  and it cannot clash with the application's SQLite or SQLCipher.
+  - Android needs it anyway: the NDK has no public SQLite.
+  - On Windows it is always on: there is no system SQLite to link against.
+- **Static library linked into an app that also has SQLite or SQLCipher**
+  (typical on iOS, and on macOS when the app links `.a`): do **not** use
+  `bundled-sqlite`, and do not link the system `libsqlite3` either. arti
+  then uses the application's own engine, which provides the same
+  `sqlite3_*` functions. Two copies in one statically linked binary can
+  silently replace the encrypted database engine with the plain one.
 - **iOS, at the time of writing.** arti 0.47 does not build for iOS with
   `libc` 0.2.190.
   - That libc release gated `mach_*` functions to macOS. This is fixed in
@@ -132,6 +137,13 @@ bootstraps.
   - Until both are resolved upstream, pin `libc` to 0.2.189. We have
     proposed a small `tor-memquota` change to arti that removes `sysinfo` on
     iOS without raising its minimum Rust version.
+
+**Dependency audit.** `cargo audit` reports RUSTSEC-2023-0071 (the "Marvin"
+timing attack on private-key RSA) through arti's `rsa` dependency. A Tor
+client makes no private-key RSA operations. arti tracks the switch it needs
+before it makes RSA signatures (relays, directory authorities) in
+[tpo/core/arti#2447](https://gitlab.torproject.org/tpo/core/arti/-/issues/2447).
+CI ignores that advisory, and only that one.
 
 ## Privacy
 

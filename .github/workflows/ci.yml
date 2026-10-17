@@ -79,7 +79,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # The release toolchain (tools/release_env.sh): published libraries
+      # are built and checked with it.
+      - uses: dtolnay/rust-toolchain@1.93.1
       - run: tools/check_reproducible.sh
 
   fuzz:
@@ -133,3 +135,82 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           working-directory: tor
+          # RUSTSEC-2023-0071 (Marvin, `rsa`): a timing side channel in
+          # private-key RSA operations. A Tor client makes none; arti tracks
+          # the switch needed before it makes RSA signatures (relays,
+          # directory authorities) in tpo/core/arti#2447.
+          ignore: RUSTSEC-2023-0071
+
+  c-abi:
+    # include/seylock.h must match the library: a C program drives the whole
+    # ABI through the header alone.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: tools/check_c_abi.sh
+
+  swift:
+    # The Swift package: build the XCFramework, run the tests on macOS
+    # (including a request through the proxy), and build for iOS.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim, aarch64-apple-darwin, x86_64-apple-darwin
+      - run: tools/build_xcframework.sh
+      - run: cp -R target/xcframework/SeyLockFFI.xcframework bindings/swift/
+      - run: swift test
+      - run: xcodebuild -scheme SeyLock -destination "generic/platform=iOS Simulator" build
+
+  android:
+    # The Android library: native libraries for three ABIs, Kotlin unit tests
+    # on the JVM (including a request through the proxy), and the AAR.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - run: cargo build --release --lib --locked
+      # The runner's own variables are not in the `env` context, so the NDK
+      # is passed in the shell.
+      - run: ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" tools/build_android_libs.sh
+      - run: ./gradlew --no-daemon :seylock:testDebugUnitTest :seylock:assembleRelease :sample:assembleRelease
+        working-directory: bindings/android
+
+
+  lab:
+    # Real TLS end to end with a test certificate authority, then the network
+    # lab: two namespaces, iptables and tc netem (tools/netem_lab.sh). A short
+    # run on every push keeps the lab working; a manual run gives the full
+    # table (100 runs per row) as an artifact.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --all-targets --features lab-roots --locked
+      - run: cargo test --features lab-roots --test lab_tls --locked
+      - name: Kernel modules for netem and the iptables string match
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q "linux-modules-extra-$(uname -r)" || echo "no extra modules package for $(uname -r)"
+          sudo modprobe sch_netem
+          sudo modprobe xt_string
+      - run: tools/netem_lab.sh ${{ github.event_name == 'workflow_dispatch' && '100 10' || '3 1' }}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: netem-lab
+          path: target/netem_lab/

@@ -22,7 +22,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -73,11 +73,17 @@ pub trait TorConnector: Send + Sync + 'static {
 
 static CONNECTOR: RwLock<Option<Arc<dyn TorConnector>>> = RwLock::new(None);
 static LIST_BRIDGES: RwLock<Vec<String>> = RwLock::new(Vec::new());
+/// Serialises [`install`] and [`set_list_bridges`], so a connector being
+/// installed cannot miss bridges that change at the same moment. No other
+/// lock is held while it is taken, and connectors are called with only this
+/// one held.
+static BRIDGE_UPDATES: Mutex<()> = Mutex::new(());
 
 /// Installs `connector` for the whole process, replacing any earlier one.
 /// Requests that start afterwards use it. It receives the bridges of the
 /// current list at once.
 pub fn install(connector: Arc<dyn TorConnector>) {
+    let _serial = BRIDGE_UPDATES.lock().unwrap_or_else(|e| e.into_inner());
     let bridges = LIST_BRIDGES
         .read()
         .unwrap_or_else(|e| e.into_inner())
@@ -92,6 +98,7 @@ pub fn install(connector: Arc<dyn TorConnector>) {
 /// installed connector if they changed. The proxy calls this on start and
 /// whenever its list is replaced.
 pub fn set_list_bridges(bridges: &[String]) {
+    let _serial = BRIDGE_UPDATES.lock().unwrap_or_else(|e| e.into_inner());
     {
         let mut current = LIST_BRIDGES.write().unwrap_or_else(|e| e.into_inner());
         if current.as_slice() == bridges {

@@ -21,8 +21,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use ed25519_dalek::{Signer as _, SigningKey};
 use seylock::endpoints::{self, EndpointList, SignedEndpointList};
-use seylock::paths::PathMemory;
-use seylock::proxy::{self, HEADER_SERVICE, HEADER_TRANSPORT_TOKEN, Policy, Race};
+use seylock::proxy::{self, HEADER_SERVICE, HEADER_TRANSPORT_TOKEN, Policy};
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -46,11 +45,22 @@ fn signing_key(path: &str) -> Result<SigningKey, String> {
 }
 
 fn keygen(out: &str) -> Result<(), String> {
-    if std::path::Path::new(out).exists() {
-        return Err(format!("{out} already exists; refusing to overwrite a key"));
-    }
+    use std::io::Write as _;
     let key = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
-    std::fs::write(out, B64.encode(key.to_bytes())).map_err(|e| format!("{out}: {e}"))?;
+    // Created new, never overwritten, and readable by the owner only: whoever
+    // reads this file can redirect every client of the list.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(out).map_err(|e| match e.kind() {
+        std::io::ErrorKind::AlreadyExists => {
+            format!("{out} already exists; refusing to overwrite a key")
+        }
+        _ => format!("{out}: {e}"),
+    })?;
+    file.write_all(B64.encode(key.to_bytes()).as_bytes())
+        .map_err(|e| format!("{out}: {e}"))?;
     println!("secret key written to {out} (keep it offline)");
     println!("public key: {}", B64.encode(key.verifying_key().to_bytes()));
     Ok(())
@@ -95,14 +105,11 @@ fn serve(public: &str, signed_path: &str) -> Result<(), String> {
     let list_services: Vec<String> = list.services.keys().cloned().collect();
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     let handle = runtime
-        .block_on(proxy::start(Policy {
-            list,
-            memory: PathMemory::default(),
-            network_id: "cli".into(),
-            allow_tor: false,
-            allow_socks: true,
-            current: None,
-            race: Race::default(),
+        .block_on(proxy::start({
+            let mut policy = Policy::new(list);
+            policy.network_id = "cli".into();
+            policy.allow_socks = true;
+            policy
         }))
         .map_err(|e| e.to_string())?;
     println!("proxy listening on 127.0.0.1:{}", handle.port);

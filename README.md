@@ -49,6 +49,10 @@ reach SeyLock and every request is signed by the device key. It does not
 depend on Secretly's servers: the addresses come from the signed list you give
 it.
 
+**Start here:** [INTEGRATING.md](INTEGRATING.md) walks an operator and an
+application developer through putting SeyLock under an existing app, in about
+an hour.
+
 ## Status
 
 Version 0.1. Tested in CI on Linux, macOS and Windows; built into Secretly's
@@ -105,36 +109,102 @@ services (`api`, `media`, …) instead of the fixed pair `keys` and `relay`.
 
 ```rust,no_run
 use seylock::endpoints;
-use seylock::paths::PathMemory;
-use seylock::proxy::{self, Policy, Race};
+use seylock::proxy::{self, Policy};
 
 # async fn demo(signed_json: &str, pinned_key_b64: &str, now_ms: i64) {
 let list = endpoints::verify_and_parse(signed_json, pinned_key_b64, now_ms, 0)
     .expect("list rejected");
-let handle = proxy::start(Policy {
-    list,
-    memory: PathMemory::default(), // persist `memory` between runs
-    network_id: "wifi:home".into(),
-    allow_tor: false,
-    allow_socks: false,
-    current: None,
-    race: Race::default(), // paths race at the connection stage
-})
-.await
-.expect("bind loopback");
+// Paths race at the connection stage by default.
+let mut policy = Policy::new(list);
+policy.network_id = "wifi:home".into(); // an opaque id, never the Wi-Fi name
+policy.response_timeout_ms = Some(20_000); // fail over from a silent path
+// Restore `policy.memory` saved from `handle.policy().await.memory` last run.
+let handle = proxy::start(policy).await.expect("bind loopback");
 // Send requests to http://127.0.0.1:{handle.port} with the headers
 // x-transport-token: {handle.token}
 // x-transport-service: <a service name from the list>
 # }
 ```
 
-## Using it from other languages
+## Using it from Swift (iOS, macOS)
 
-The `ffi` module exposes a C ABI: verify a list, start, update the policy,
-report a network change, read status as JSON, stop. Strings returned by the
-library are freed with `seylock_string_free`. The Secretly app
-calls it from Dart through `dart:ffi`. The crate builds as `staticlib` and
-`cdylib` for Android, iOS, macOS, Windows and Linux.
+Add the package `https://github.com/Arkhanhel/seylock` in Xcode or in
+`Package.swift`. It brings a prebuilt XCFramework (iOS devices, the iOS
+simulator on Apple silicon, macOS) and a small Swift API:
+
+```swift
+import SeyLock
+
+let list = try SeyLock.verifyList(signedJSON: signed, publicKeyBase64: pinnedKey)
+let proxy = try SeyLock.start(policyJSON: #"{"list":\#(list),"race":{},"response_timeout_ms":20000}"#)
+
+// Any URLRequest to your server, sent through SeyLock:
+let request = proxy.request(for: URLRequest(url: apiURL), service: "api")
+let (data, response) = try await URLSession.shared.data(for: request)
+```
+
+Errors arrive as `SeyLockError` (`listRejected(code:)`, `notRunning`, ...),
+and memory returned by the library is freed for you. The package's tests
+send a real `URLSession` request through the proxy.
+
+## Using it from Kotlin (Android)
+
+The Android library `io.github.arkhanhel:seylock` carries `libseylock.so`
+for arm64-v8a, armeabi-v7a and x86_64 and a Kotlin API over it (through JNA,
+as UniFFI's Kotlin bindings do). Until it is on Maven Central, take
+`seylock-<version>.aar` from the GitHub release and add it with JNA:
+
+```kotlin
+dependencies {
+    implementation(files("libs/seylock-0.2.0.aar"))
+    implementation("net.java.dev.jna:jna:5.17.0@aar")
+}
+```
+
+The proxy speaks plain HTTP on `127.0.0.1`, which Android 9 and later refuse
+by default. The AAR ships a configuration that allows it for `127.0.0.1` and
+nothing else; point the manifest at it:
+
+```xml
+<application android:networkSecurityConfig="@xml/seylock_network_security_config">
+```
+
+[`bindings/android/sample`](bindings/android/sample) is a complete minimal
+application doing exactly this, minified by R8 as a release build would be.
+
+```kotlin
+import io.github.arkhanhel.seylock.SeyLock
+
+val list = SeyLock.verifyList(signedJson, pinnedKeyBase64)
+val proxy = SeyLock.start("""{"list":$list,"race":{},"response_timeout_ms":20000}""")
+
+// With OkHttp, one interceptor sends every request through SeyLock:
+val client = OkHttpClient.Builder().addInterceptor { chain ->
+    val request = chain.request()
+    val url = proxy.url(request.url.toUrl()).toString().toHttpUrl()
+    chain.proceed(request.newBuilder().url(url).apply {
+        proxy.headers("api").forEach { (k, v) -> header(k, v) }
+    }.build())
+}.build()
+```
+
+Errors arrive as `SeyLockException` subclasses. The library's tests run on
+the JVM and on an Android emulator, each sending a real request through the
+proxy. `tools/build_android_libs.sh` builds the native libraries;
+`bindings/android` builds the AAR.
+
+## Using it from C and other languages
+
+[`include/seylock.h`](include/seylock.h) declares the C ABI with its rules
+(who frees what, every return code): verify a list, start, update the
+policy, report a network change, read status as JSON, stop. Strings
+returned by the library are freed with `seylock_string_free`.
+`tools/check_c_abi.sh` compiles a C program against that header and the
+static library in CI, so the two cannot drift apart.
+
+The Secretly app calls the same ABI from Dart through `dart:ffi`. The crate
+builds as `staticlib` and `cdylib` for Android, iOS, macOS, Windows and
+Linux.
 
 See [PROTOCOL.md](PROTOCOL.md) for the list format, the proxy's request
 rules and the error codes.
@@ -150,11 +220,14 @@ repository under `server/proxy/tlsproxy/`.
 
 | Check | What it shows |
 |---|---|
-| `cargo test` | Unit and integration tests, including racing, and the README example compiled as a doctest. |
-| `test-vectors/endpoints.json` | 55 signed lists with the result each must give, written by hand from PROTOCOL.md. |
+| `cargo test` | Unit and integration tests, including racing, failover from silent and broken paths, and the README example compiled as a doctest. |
+| `cargo test --features lab-roots` | Real TLS end to end with a test authority: trusted, foreign, wrong name, TLS inside TLS. |
+| `test-vectors/endpoints.json` | 63 signed lists with the result each must give, written by hand from PROTOCOL.md, including repeated keys and non-canonical base64. |
 | `tools/verify_vectors.py` | A second implementation in plain Python, with its own Ed25519 from RFC 8032 and no third-party code, agreeing on every vector. |
 | `tests/robustness.rs`, `fuzz/` | Damaged and extreme input never panics; four fuzz targets run nightly in CI. |
-| `tools/check_reproducible.sh` | Two builds from different directories give byte-identical libraries. |
+| `tools/check_reproducible.sh` | Two builds from different directories, with the release settings, give byte-identical libraries with no path of the build machine in them. |
+| Release builds | Made with Rust 1.93.1 (`tools/release_env.sh`); `SeyLockFFI.xcframework.zip` and the Android libraries come out byte-identical from any directory, so anyone can check them against the source. |
+| `tools/netem_lab.sh` | The Linux network lab: real TLS, `iptables` blocking, `tc netem` latency and loss. |
 | `examples/race_lab.rs` | The racing measurements in [RACE_LAB.md](RACE_LAB.md). |
 
 ## Security notes
@@ -183,11 +256,8 @@ described in [SECURITY.md](SECURITY.md).
 
 ## Roadmap
 
-- **Packages for mobile developers:** Kotlin and Swift bindings, an Android
-  AAR on Maven Central and a Swift package.
-- **Bridges in the signed list:** Tor bridge lines distributed and rotated
-  like the other ways in. Today `seylock-tor` takes them from the
-  application.
+- **The AAR on Maven Central** (today it is a release asset, as the
+  XCFramework is for the Swift package).
 - **Less recognisable TLS:** Encrypted Client Hello where the CDN supports
   it, and a measured look at browser-like ClientHellos.
 - **Open blocking statistics:** which ways in work on which networks,
