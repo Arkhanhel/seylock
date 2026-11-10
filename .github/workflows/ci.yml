@@ -139,7 +139,20 @@ jobs:
           # private-key RSA operations. A Tor client makes none; arti tracks
           # the switch needed before it makes RSA signatures (relays,
           # directory authorities) in tpo/core/arti#2447.
-          ignore: RUSTSEC-2023-0071
+          #
+          # RUSTSEC-2026-0387 (`crypto-bigint` 0.5.5, timing): reached only
+          # through ECDSA (p256/p384/p521) in arti's SSH-format key parser
+          # (ssh-key-fork-arti, via tor-keymgr). Tor client keys are
+          # ed25519/x25519, so no ECDSA operation runs on secret data.
+          #
+          # RUSTSEC-2026-0459 (`libsqlite3-sys` 0.38.2, bundled SQLite
+          # CVE-2026-119375): local attack vector only (CVSS AV:L), against
+          # arti's directory cache in the app's own data directory. arti 0.47
+          # and 0.48 both pin rusqlite < 0.41, so the fix needs a newer arti.
+          #
+          # Drop both entries when arti moves to elliptic-curve 0.14 and
+          # rusqlite 0.41.
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2026-0387,RUSTSEC-2026-0459
 
   c-abi:
     # include/seylock.h must match the library: a C program drives the whole
